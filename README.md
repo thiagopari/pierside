@@ -8,8 +8,8 @@ Booking a dock, piling, seawall or hull inspection today takes days of phone tag
 
 ## Try it
 
-- **Hosted demo:** _URL added after deploy_ (Render free tier: the first load after idle takes about a minute)
-- **PayPal sandbox buyer:** _email / password added after deploy_ (fake money, PayPal sandbox only)
+- **Hosted demo:** https://pierside.onrender.com (Render free tier: the first load after idle takes about a minute)
+- **PayPal sandbox buyer:** `sb-omnq353715140@personal.example.com` / `xN8%EHX2` (fake money, PayPal sandbox only)
 
 Try: "12 wooden pilings at our marina in Quincy, about 25 ft deep", answer the agent's questions, pick a slot, then pay the deposit with the sandbox buyer.
 
