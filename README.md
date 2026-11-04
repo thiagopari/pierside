@@ -37,9 +37,17 @@ browser (static/index.html)
   │                                                       → book slot → PayPal Invoicing v2: draft balance
   │                                                       → Claude: confirmation + pre-dive plan
   └─ job sheet: live quote lines, slot, deposit button, booking card
+
+PayPal webhooks → POST /api/paypal/webhook → verify signature with PayPal → skip duplicates
+  ├─ CHECKOUT.ORDER.APPROVED / PAYMENT.CAPTURE.COMPLETED → same capture + book step (buyer closed the tab)
+  └─ PAYMENT.CAPTURE.REFUNDED / REVERSED / DENIED        → booking status updated, slot released
+
+SQLite (Render disk): sessions + chat history, orders, bookings, webhook events
 ```
 
-About 550 lines of Python and one HTML page. PayPal is called over plain REST with the standard library ([`paypal.py`](paypal.py)). Claude is called with the official `anthropic` SDK.
+**Payment safety:** the browser and the webhook both go through one capture-and-book function. It is idempotent: it checks the order with PayPal before capturing, sends a `PayPal-Request-Id`, and returns the existing booking if the other path got there first. A database constraint allows one confirmed booking per slot. The page keeps its job id in the browser, so a reload or a reopened tab shows the same job.
+
+About 700 lines of Python and one HTML page. PayPal is called over plain REST with the standard library ([`paypal.py`](paypal.py)). Claude is called with the official `anthropic` SDK.
 
 **Demo guardrails:** Haiku model, low effort, a per-IP hourly limit, a global daily cap on model calls, 25 messages per chat, a capped tool loop, client-side photo downscaling to 1024 px, and a spend limit on the API key.
 
@@ -59,17 +67,18 @@ set -a; . ./.env; set +a
 ```bash
 .venv/bin/python pricing.py   # rate card self-check
 .venv/bin/python test_e2e.py  # boots the server with MOCK=1: chat → quote → hold → order → capture → booked,
-                              # plus double-booking and forged-order checks
+                              # plus double-booking, forged-order, webhook (closed tab), duplicate-event,
+                              # restart-persistence and refund checks
 ```
 
 ## Deploy
 
-`render.yaml` is a Render Blueprint (free web service). Set `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET` and `ANTHROPIC_API_KEY` in the dashboard.
+`render.yaml` is a Render Blueprint: an always-on web service with a 1 GB disk for the SQLite file. Set `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `ANTHROPIC_API_KEY` and `PAYPAL_WEBHOOK_ID` in the dashboard. Register the webhook (URL `https://<your-service>/api/paypal/webhook`) in the PayPal developer dashboard or with `POST /v1/notifications/webhooks`; the server rejects every webhook until `PAYPAL_WEBHOOK_ID` is set.
 
 ## Notes
 
 - The company, rate card and prices are illustrative. Payments run in the PayPal sandbox only.
-- State is in memory (bookings reset when the free instance sleeps). Fine for a demo; a real deployment would add a database and PayPal webhooks.
+- Slot holds (15 minutes) live in memory and can be lost on a restart; bookings cannot. One instance only: SQLite with one connection.
 
 ## License
 

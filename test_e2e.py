@@ -1,11 +1,41 @@
-"""End-to-end over HTTP with MOCK=1: chat -> quote -> slot hold -> PayPal order -> capture -> booked.
+"""End-to-end over HTTP with MOCK=1: chat -> quote -> slot hold -> PayPal order -> capture -> booked,
+the same booking driven by a PayPal webhook instead (closed tab), and bookings surviving a restart.
 Run: .venv/bin/python test_e2e.py"""
-import json, os, subprocess, sys, time, urllib.request, uuid
+import json, os, subprocess, sys, tempfile, time, urllib.request, uuid
 
 PORT = 8765
-srv = subprocess.Popen([sys.executable, "-m", "uvicorn", "app:app", "--port", str(PORT)],
-                       env={**os.environ, "MOCK": "1"}, cwd=os.path.dirname(os.path.abspath(__file__)),
-                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+DB_PATH = os.path.join(tempfile.mkdtemp(), "test.db")
+
+
+def start():
+    p = subprocess.Popen([sys.executable, "-m", "uvicorn", "app:app", "--port", str(PORT)],
+                         env={**os.environ, "MOCK": "1", "DB_PATH": DB_PATH}, cwd=os.path.dirname(os.path.abspath(__file__)),
+                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    for _ in range(50):
+        try:
+            return p, json.loads(urllib.request.urlopen(f"http://127.0.0.1:{PORT}/api/config").read())
+        except OSError:
+            time.sleep(0.2)
+    raise SystemExit(p.communicate()[1].decode()[-3000:])
+
+
+def stop(p):
+    p.terminate()
+    err = p.communicate()[1].decode()
+    if "Traceback" in err:
+        print(err[-3000:])
+
+
+def get(path):
+    return json.loads(urllib.request.urlopen(f"http://127.0.0.1:{PORT}{path}").read())
+
+
+def scope_and_hold(sid):
+    post("/api/chat", {"session_id": sid, "message": "12 pilings in Quincy, 25 ft"})
+    return post("/api/chat", {"session_id": sid, "message": "first open weekday please"})
+
+
+srv, cfg = start()
 
 
 def post(path, body):
@@ -16,12 +46,6 @@ def post(path, body):
 
 
 try:
-    for _ in range(50):
-        try:
-            cfg = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{PORT}/api/config").read())
-            break
-        except OSError:
-            time.sleep(0.2)
     assert cfg["mock_ai"] and cfg["mock_paypal"], cfg
     assert b"Job sheet" in urllib.request.urlopen(f"http://127.0.0.1:{PORT}/").read()
     sid = uuid.uuid4().hex
@@ -49,9 +73,35 @@ try:
         raise AssertionError("capture with someone else's order id must fail")
     except urllib.error.HTTPError as e:
         assert e.code == 400
-    print("e2e ok:", b["id"], b["slot"], "deposit", b["deposit"], "of", q["total"])
+
+    # closed tab: the buyer approved in PayPal but the page never called /api/capture; the webhook books it
+    tab = uuid.uuid4().hex
+    scope_and_hold(tab)
+    tab_order = post("/api/order", {"session_id": tab})["id"]
+    event = {"id": "WH-" + uuid.uuid4().hex, "event_type": "CHECKOUT.ORDER.APPROVED", "resource": {"id": tab_order}}
+    assert post("/api/paypal/webhook", event)["result"].startswith("booked PS-")
+    assert post("/api/paypal/webhook", event)["result"] == "duplicate"  # PayPal redelivers; nothing happens twice
+    s = get("/api/session?session_id=" + tab)
+    assert s["state"]["booking"]["order_id"] == tab_order and "Pre-dive plan" in s["history"][-1]["text"], s
+    # the page comes back late and calls capture anyway: same booking, no second charge
+    late = post("/api/capture", {"session_id": tab, "order_id": tab_order})
+    assert late["state"]["booking"]["id"] == s["state"]["booking"]["id"], late
+    unknown = {"id": "WH-" + uuid.uuid4().hex, "event_type": "CHECKOUT.ORDER.APPROVED", "resource": {"id": "NOPE"}}
+    assert post("/api/paypal/webhook", unknown)["result"] == "ignored"
+
+    # restart: bookings, chat history and taken slots come back from SQLite
+    stop(srv)
+    srv, _ = start()
+    s = get("/api/session?session_id=" + sid)
+    assert s["state"]["booking"]["id"] == b["id"] and s["history"][0]["who"] == "me", s
+    third = uuid.uuid4().hex
+    r3 = scope_and_hold(third)
+    assert r3["state"]["slot"]["slot_id"] not in (r["state"]["slot"]["slot_id"], late["state"]["slot"]["slot_id"]), r3
+
+    # a refund releases the slot
+    refund = {"id": "WH-" + uuid.uuid4().hex, "event_type": "PAYMENT.CAPTURE.REFUNDED",
+              "resource": {"supplementary_data": {"related_ids": {"order_id": tab_order}}}}
+    assert post("/api/paypal/webhook", refund)["result"] == "refunded, slot released"
+    print("e2e ok:", b["id"], b["slot"], "deposit", b["deposit"], "of", q["total"], "| webhook booking + restart + refund ok")
 finally:
-    srv.terminate()
-    err = srv.communicate()[1].decode()
-    if "Traceback" in err:
-        print(err[-3000:])
+    stop(srv)

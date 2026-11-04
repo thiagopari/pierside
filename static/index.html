@@ -15,6 +15,7 @@
   header { display: flex; align-items: center; gap: 12px; padding: 14px 24px; background: var(--ink); color: #fff; }
   header h1 { font-size: 18px; margin: 0; letter-spacing: .3px; }
   header p { margin: 0; color: #b8c8d6; font-size: 13px; }
+  header .ghost { background: transparent; color: #cfe3f1; border: 1px solid #3a5b78; padding: 3px 10px; font-size: 12px; }
   .badge { margin-left: auto; font-size: 12px; padding: 3px 8px; border-radius: 99px; background: #26445f; color: #cfe3f1; white-space: nowrap; }
   .steps { display: flex; gap: 6px; padding: 10px 24px; background: #fff; border-bottom: 1px solid var(--line); overflow-x: auto; }
   .step { font-size: 13px; padding: 4px 12px; border-radius: 99px; background: var(--bg); color: var(--muted); white-space: nowrap; }
@@ -63,7 +64,7 @@
     <h1>Pierside</h1>
     <p>Underwater ROV inspections: scoped by AI, priced by a fixed rate card, booked with a PayPal deposit</p>
   </div>
-  <span class="badge" id="mode">sandbox</span>
+  <span style="margin-left:auto"><button class="btn ghost" id="newJob" title="Start over with a new job">New job</button> <span class="badge" id="mode">sandbox</span></span>
 </header>
 <div class="steps">
   <span class="step" data-step="0">1 · Describe the site</span>
@@ -102,7 +103,10 @@
 </main>
 
 <script>
-const sid = crypto.randomUUID();
+// the job survives a reload or a closed tab: the server keeps it, the browser keeps its id
+let sid = null;
+try { sid = localStorage.getItem("pierside_sid"); } catch (e) {}
+if (!sid) { sid = crypto.randomUUID(); try { localStorage.setItem("pierside_sid", sid); } catch (e) {} }
 const $ = (id) => document.getElementById(id);
 let cfg = {}, state = {}, photo = "", busy = false, buttonsShown = false;
 const usd = (n) => "$" + Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -155,7 +159,8 @@ function render() {
 }
 
 function showPay() {
-  if (buttonsShown) return; buttonsShown = true;
+  if (buttonsShown || (!cfg.mock_paypal && !window.paypal)) return; // the SDK's onload calls back
+  buttonsShown = true;
   $("pay").replaceChildren();
   const createOrder = () => api("/api/order", { session_id: sid }).then((o) => o.id);
   const onApprove = (d) => api("/api/capture", { session_id: sid, order_id: d.orderID }).then(done);
@@ -167,7 +172,7 @@ function showPay() {
     $("pay").append(b);
   } else if (window.paypal) {
     paypal.Buttons({ style: { layout: "vertical", label: "pay" }, createOrder, onApprove, onError: fail }).render("#pay");
-  } else fail("PayPal checkout failed to load. Reload the page.");
+  }
 }
 
 function done(r) {
@@ -188,6 +193,7 @@ async function send(text) {
   photo = ""; $("photoName").textContent = ""; busy = false; $("send").disabled = false; $("q").focus();
 }
 
+$("newJob").onclick = () => { try { localStorage.removeItem("pierside_sid"); } catch (e) {} location.reload(); };
 $("f").onsubmit = (e) => { e.preventDefault(); const t = $("q").value.trim(); $("q").value = ""; send(t); };
 $("chips").onclick = (e) => { if (e.target.tagName === "BUTTON") send(e.target.textContent); };
 $("photo").onchange = async (e) => {
@@ -204,10 +210,16 @@ api("/api/config").then((c) => {
   if (!c.mock_paypal) {
     const s = document.createElement("script");
     s.src = `https://www.paypal.com/sdk/js?client-id=${encodeURIComponent(c.paypal_client_id)}&currency=USD&intent=capture`;
-    s.onload = () => { if (state.quote && state.slot && !state.booking) { buttonsShown = false; showPay(); } };
+    s.onload = () => { if (state.quote && state.slot && !state.booking) showPay(); };
+    s.onerror = () => { $("err").textContent = "PayPal checkout failed to load. Reload the page."; };
     document.head.append(s);
   }
-});
+  return api("/api/session?session_id=" + encodeURIComponent(sid));
+}).then((r) => {
+  r.history.forEach((h) => { add(h.who, h.text); if (h.tools) addTools(h.tools); });
+  if (r.history.length) $("chips").hidden = true;
+  state = r.state; render();
+}).catch((e) => { $("err").textContent = String(e.message || e); });
 render();
 </script>
 </body>

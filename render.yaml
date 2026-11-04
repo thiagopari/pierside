@@ -2,13 +2,19 @@ services:
   - type: web
     name: pierside
     runtime: python
-    plan: free
+    plan: starter  # always on (no cold starts for PayPal webhooks); covered by the hackathon credit
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/config
+    disk:  # SQLite: sessions, orders, bookings, webhook events survive restarts and deploys
+      name: data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.3
+      - key: DB_PATH
+        value: /var/data/pierside.db
       - key: MOCK
         value: "0"
       - key: MODEL
@@ -22,4 +28,6 @@ services:
       - key: PAYPAL_CLIENT_SECRET
         sync: false
       - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: PAYPAL_WEBHOOK_ID  # from POST /v1/notifications/webhooks; without it every webhook is rejected
         sync: false

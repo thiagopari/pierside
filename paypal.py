@@ -8,6 +8,7 @@ import base64, json, os, time, uuid, urllib.error, urllib.request
 BASE = os.environ.get("PAYPAL_BASE", "https://api-m.sandbox.paypal.com")
 CLIENT_ID = os.environ.get("PAYPAL_CLIENT_ID", "")
 SECRET = os.environ.get("PAYPAL_CLIENT_SECRET", "")
+WEBHOOK_ID = os.environ.get("PAYPAL_WEBHOOK_ID", "")
 MOCK = os.environ.get("MOCK", "auto") == "1" or (os.environ.get("MOCK", "auto") == "auto" and not (CLIENT_ID and SECRET))
 if os.environ.get("MOCK") == "0" and not (CLIENT_ID and SECRET):
     raise SystemExit("MOCK=0 needs PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET")
@@ -67,19 +68,39 @@ def create_order(quote_id, deposit, description):
 
 
 def capture(order_id, expected_deposit):
-    """Capture and verify. Returns {capture_id, amount, payer_email, payer_name}."""
-    o = _call("POST", f"/v2/checkout/orders/{order_id}/capture", {},
-              headers={"PayPal-Request-Id": "capture-" + order_id})
-    cap = o["purchase_units"][0]["payments"]["captures"][0]
+    """Capture if still APPROVED, then verify. Safe to repeat: the browser's onApprove and PayPal's
+    webhooks both land here, and an already-captured order is just re-verified.
+    Returns {capture_id, amount, payer_email, payer_name}."""
+    o = _call("GET", f"/v2/checkout/orders/{order_id}")
+    if o.get("status") == "APPROVED":
+        o = _call("POST", f"/v2/checkout/orders/{order_id}/capture", {},
+                  headers={"PayPal-Request-Id": "capture-" + order_id})
+    caps = (o.get("purchase_units") or [{}])[0].get("payments", {}).get("captures") or [{}]
+    cap = caps[0]
     # never trust the browser: book only on a COMPLETED capture for the exact deposit
-    if o.get("status") != "COMPLETED" or cap["status"] != "COMPLETED" \
-            or cap["amount"]["value"] != f"{expected_deposit:.2f}":
-        raise PayPalError(f"capture not completed or amount mismatch: {o.get('status')} {cap['amount']}")
+    if o.get("status") != "COMPLETED" or cap.get("status") != "COMPLETED" \
+            or cap.get("amount", {}).get("value") != f"{expected_deposit:.2f}":
+        raise PayPalError(f"capture not completed or amount mismatch: {o.get('status')} {cap.get('status')} {cap.get('amount')}")
     payer = o.get("payer", {})
     name = payer.get("name", {})
     return {"capture_id": cap["id"], "amount": cap["amount"]["value"],
             "payer_email": payer.get("email_address", ""),
             "payer_name": f"{name.get('given_name', '')} {name.get('surname', '')}".strip()}
+
+
+def verify_webhook(headers, event):
+    """Ask PayPal whether this webhook delivery is genuine (signature check against our webhook id)."""
+    if MOCK:
+        return True
+    if not WEBHOOK_ID:
+        return False
+    r = _call("POST", "/v1/notifications/verify-webhook-signature", {
+        "auth_algo": headers.get("paypal-auth-algo"), "cert_url": headers.get("paypal-cert-url"),
+        "transmission_id": headers.get("paypal-transmission-id"),
+        "transmission_sig": headers.get("paypal-transmission-sig"),
+        "transmission_time": headers.get("paypal-transmission-time"),
+        "webhook_id": WEBHOOK_ID, "webhook_event": event})
+    return r.get("verification_status") == "SUCCESS"
 
 
 def draft_balance_invoice(quote, booking, payer_email):
@@ -104,19 +125,21 @@ def _fake(method, path, body):
         return {"access_token": "MOCK-TOKEN", "expires_in": 32400}
     if method == "POST" and path == "/v2/checkout/orders":
         oid = "MOCK" + uuid.uuid4().hex[:13].upper()
-        _fake_orders[oid] = {"id": oid, "status": "CREATED", "purchase_units": body["purchase_units"]}
+        _fake_orders[oid] = {"id": oid, "status": "APPROVED", "purchase_units": body["purchase_units"]}  # no buyer step in mock
         return {"id": oid, "status": "CREATED"}
+    o = _fake_orders.get(path.split("/")[4]) if path.startswith("/v2/checkout/orders/") else None
+    if path.startswith("/v2/checkout/orders/") and not o:
+        raise PayPalError(f"{method} {path} -> 404: RESOURCE_NOT_FOUND")
+    if method == "GET" and o:
+        return o
     if method == "POST" and path.endswith("/capture"):
-        o = _fake_orders.get(path.split("/")[4])
-        if not o:
-            raise PayPalError(f"POST {path} -> 404: RESOURCE_NOT_FOUND")
         amt = o["purchase_units"][0]["amount"]
-        o["status"] = "COMPLETED"
-        return {"id": o["id"], "status": "COMPLETED",
-                "payer": {"email_address": "sb-buyer@personal.example.com",
-                          "name": {"given_name": "Sandbox", "surname": "Buyer"}},
-                "purchase_units": [{"payments": {"captures": [
-                    {"id": "MOCKCAP" + o["id"][4:], "status": "COMPLETED", "amount": amt}]}}]}
+        o.update(status="COMPLETED",
+                 payer={"email_address": "sb-buyer@personal.example.com",
+                        "name": {"given_name": "Sandbox", "surname": "Buyer"}},
+                 purchase_units=[{**o["purchase_units"][0], "payments": {"captures": [
+                     {"id": "MOCKCAP" + o["id"][4:], "status": "COMPLETED", "amount": amt}]}}])
+        return o
     if method == "POST" and path == "/v2/invoicing/invoices":
         return {"rel": "self", "href": BASE + "/v2/invoicing/invoices/INV2-MOCK-" + uuid.uuid4().hex[:4].upper(), "method": "GET"}
     raise PayPalError(f"{method} {path} -> 404 (not faked)")
