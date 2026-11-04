@@ -1,0 +1,17 @@
+name: API tests
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -r requirements.txt
+      - name: Self-checks and end-to-end test (MOCK=1, no keys)
+        run: python pricing.py && python precedent.py && python test_e2e.py
+      - name: Postman collection (Newman)
+        run: |
+          MOCK=1 OPS_TOKEN=judge-ops DB_PATH=:memory: uvicorn app:app --port 8000 &
+          curl -s --retry 30 --retry-delay 1 --retry-connrefused http://127.0.0.1:8000/api/config > /dev/null
+          npx --yes newman@6.2.3 run postman/pierside.postman_collection.json

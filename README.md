@@ -1,5 +1,7 @@
 # Pierside
 
+[![API tests](https://github.com/thiagopari/pierside/actions/workflows/api-tests.yml/badge.svg)](https://github.com/thiagopari/pierside/actions/workflows/api-tests.yml)
+
 **An AI agent that scopes an underwater ROV inspection, prices it from a fixed rate card, takes a 30% deposit through PayPal, and books the dive slot. All in one conversation.**
 
 Booking a dock, piling, seawall or hull inspection today takes days of phone tag. The contractor needs a dozen details (asset, size, depth, visibility, marine growth, distance), sends a quote by email, then chases a deposit before committing a crew and an ROV to a date. Pierside does that in about two minutes. A customer describes the site (or sends a photo), Claude asks the follow-up questions, a deterministic rate card produces the quote, and PayPal checkout takes the deposit. The slot is booked only after the server has verified the payment.
@@ -12,6 +14,16 @@ Booking a dock, piling, seawall or hull inspection today takes days of phone tag
 - **PayPal sandbox buyer:** `sb-omnq353715140@personal.example.com` / `xN8%EHX2` (fake money, PayPal sandbox only)
 
 Try: "12 wooden pilings at our marina in Quincy, about 25 ft deep", answer the agent's questions, pick a slot, then pay the deposit with the sandbox buyer.
+
+## For judges
+
+| Criterion | Where to look |
+|---|---|
+| Technological implementation | [How PayPal and AI are used](#how-paypal-and-ai-are-used): PayPal Orders v2 + JS SDK, verified webhooks and Invoicing v2; Claude tool use with strict schemas; Render Workflows; Elasticsearch. The [tests](#tests), including a [Postman collection](postman/pierside.postman_collection.json) with negative cases, run on every push in [GitHub Actions](https://github.com/thiagopari/pierside/actions/workflows/api-tests.yml) |
+| Design | One conversation from the first message to a booked dive: [screens](docs/screens) of the chat, the live job sheet, PayPal checkout, the booking card and the phone layout. The operator side is there too: marking a dive complete sends the balance invoice, a refund releases the slot, and the [Kibana dashboard](#elastic-similar-past-jobs-and-the-operator-dashboard) compares real dives with the rate card |
+| Potential impact | For contractors who inspect docks, pilings, seawalls and hulls, and the marinas and owners who hire them. It replaces the days of phone tag between the first call and a deposit (top of this page). Demonstrated: scope, price, verified deposit and booked slot in one chat, then the balance invoiced after the dive |
+| Innovation | The model talks; money moves only through deterministic, verified code. Folder 4 of the Postman collection tests it: with `MOCK=1` a scripted model plays a prompt-injected agent that asks `price_quote` for 50% off and grabs a rush slot at the normal price, and the server keeps the rate-card price and refuses the slot. Similar past jobs (Elastic hybrid search) inform the agent's notes and never change the price |
+| Presentation | Video: link coming. [Hosted demo](https://pierside.onrender.com) with the sandbox buyer above |
 
 ## How PayPal and AI are used
 
@@ -114,6 +126,15 @@ WORKFLOW_SLUG=pierside-jobs RENDER_USE_LOCAL_DEV=1 .venv/bin/uvicorn app:app
 .venv/bin/python precedent.py # demo jobs + local past-job ranking self-check
 ELASTIC_URL=http://localhost:9200 .venv/bin/python test_e2e.py   # the same e2e with past jobs and job history in Elasticsearch
 ```
+
+The Postman collection [`postman/pierside.postman_collection.json`](postman/pierside.postman_collection.json) runs the API end to end with assertions, in four folders: a customer books a dive, the operator marks it complete (wrong token, bad hours, unknown booking, then the invoice), a closed tab is booked by the PayPal webhook (duplicate event, late capture, refund), and the guards (forged order ids, out-of-order calls, the prompt injection, bad input). Import it into Postman, or run it with Newman (26 requests, 33 assertions):
+
+```bash
+MOCK=1 OPS_TOKEN=judge-ops DB_PATH=:memory: .venv/bin/uvicorn app:app &
+npx newman@6.2.3 run postman/pierside.postman_collection.json
+```
+
+GitHub Actions ([`api-tests.yml`](.github/workflows/api-tests.yml)) runs all of these except the Elasticsearch one on every push.
 
 ## Deploy
 
