@@ -77,6 +77,7 @@ try:
 
     r = post("/api/chat", {"session_id": sid, "message": "first open weekday please"})
     assert r["tools"] == ["list_slots", "hold_slot"] and r["state"]["slot"], r
+    assert "first open weekday" in r["reply"] and "Held" in r["reply"], r  # text from every round of the tool loop
 
     order_id = post("/api/order", {"session_id": sid})["id"]
     r = post("/api/capture", {"session_id": sid, "order_id": order_id})

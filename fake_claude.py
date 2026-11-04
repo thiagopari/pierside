@@ -10,9 +10,10 @@ def text(t):
     return NS(content=[NS(type="text", text="[mock AI] " + t)], stop_reason="end_turn")
 
 
-def call(*calls):
-    """calls: (name, input) pairs, all in one assistant turn."""
-    return NS(content=[NS(type="tool_use", id="toolu_" + uuid.uuid4().hex[:8], name=n, input=a) for n, a in calls],
+def call(*calls, say=""):
+    """calls: (name, input) pairs, all in one assistant turn, after the text `say` if any."""
+    return NS(content=([NS(type="text", text="[mock AI] " + say)] if say else [])
+              + [NS(type="tool_use", id="toolu_" + uuid.uuid4().hex[:8], name=n, input=a) for n, a in calls],
               stop_reason="tool_use")
 
 
@@ -34,7 +35,7 @@ class FakeClaude:
                             + "Shall I find a dive slot?")
             if "list_slots" in out:
                 slot = next(x for x in out["list_slots"]["slots"] if not x["rush"])
-                return call(("hold_slot", {"slot_id": slot["slot_id"]}))
+                return call(("hold_slot", {"slot_id": slot["slot_id"]}), say=f"{slot['label']} is the first open weekday.")
             return text(f"Held {out['hold_slot'].get('held')}. Pay the deposit with the PayPal button to book it.")
         said = " ".join(b["text"] for b in last if b["type"] == "text")
         if said.startswith("PAYMENT EVENT"):

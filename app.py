@@ -224,12 +224,13 @@ def add_user(s, content):
 
 def agent_turn(sid, s, content):
     add_user(s, content)
-    used = []
+    used, said = [], []
     for _ in range(MAX_LOOP):
         count_call()
         r = client.messages.create(model=MODEL, max_tokens=2000, system=SYSTEM, tools=TOOLS,
                                    output_config={"effort": "low"}, messages=s["messages"])
         s["messages"].append({"role": "assistant", "content": [block(b) for b in r.content]})
+        said += [b.text.strip() for b in r.content if b.type == "text" and b.text.strip()]  # text next to a tool call counts too
         if r.stop_reason == "pause_turn":
             continue
         if r.stop_reason != "tool_use":
@@ -243,8 +244,7 @@ def agent_turn(sid, s, content):
         s["messages"].append({"role": "user", "content": results})
     if r.stop_reason == "refusal":
         return "Sorry, I can't help with that. I can scope and book an underwater inspection.", used
-    text = "\n".join(b.text for b in r.content if b.type == "text").strip()
-    return text or "Done. Check the job sheet on the right.", used
+    return "\n\n".join(said) or "Done. Check the job sheet on the right.", used
 
 
 def block(b):
