@@ -1,10 +1,14 @@
 """End-to-end over HTTP with MOCK=1: chat -> quote -> slot hold -> PayPal order -> capture -> booked,
 the same booking driven by a PayPal webhook instead (closed tab), bookings surviving a restart, and the
 operator's dive-complete call sending the balance invoice.
+With ELASTIC_URL set (seeded: python precedent.py seed), the past-jobs search and the job history run
+against Elasticsearch, and the test removes the bookings it indexed.
 Run: .venv/bin/python test_e2e.py   (jobs.py tasks run in-process)
 Against the real Workflows runtime: `render workflows dev --env-file <file with MOCK=1> -- .venv/bin/python jobs.py`,
 then WORKFLOW_SLUG=pierside-jobs RENDER_USE_LOCAL_DEV=1 .venv/bin/python test_e2e.py"""
 import json, os, subprocess, sys, tempfile, time, urllib.request, uuid
+
+import precedent
 
 PORT = 8765
 DB_PATH = os.path.join(tempfile.mkdtemp(), "test.db")
@@ -66,7 +70,10 @@ try:
 
     r = post("/api/chat", {"session_id": sid, "message": "12 pilings in Quincy, 25 ft"})
     q = r["state"]["quote"]
-    assert r["tools"] == ["price_quote"] and q["deposit"] == round(q["total"] * 0.3, 2), r
+    assert r["tools"] == ["price_quote", "search_similar_sites"] and q["deposit"] == round(q["total"] * 0.3, 2), r
+    past = r["state"]["precedent"]
+    assert len(past["jobs"]) == 3 and past["source"] == ("Elasticsearch" if precedent.URL else "local fallback (no Elastic configured)"), past
+    assert all(j["asset_type"] == "pilings" and j["demo"] for j in past["jobs"]) and past["jobs"][0]["site"] in r["reply"], r
 
     r = post("/api/chat", {"session_id": sid, "message": "first open weekday please"})
     assert r["tools"] == ["list_slots", "hold_slot"] and r["state"]["slot"], r
@@ -121,7 +128,13 @@ try:
         except urllib.error.HTTPError as e:
             assert e.code == 401
     ops = {"Authorization": "Bearer test-ops"}
-    done = post("/api/ops/complete", {"booking_id": b["id"]}, **ops)["booking"]
+    try:
+        post("/api/ops/complete", {"booking_id": b["id"], "actual_hours": -2}, **ops)
+        raise AssertionError("negative dive hours must be rejected")
+    except urllib.error.HTTPError as e:
+        assert e.code == 422
+    done = post("/api/ops/complete", {"booking_id": b["id"], "actual_hours": 5.5,
+                                      "findings": "Heavy mussels on the outer row; 3 ft visibility."}, **ops)["booking"]
     assert done["dive"] == "complete" and done["balance_invoice"]["status"] == "SENT" and done["balance_invoice"]["url"], done
     assert get("/api/session?session_id=" + sid)["state"]["booking"]["balance_invoice"] == done["balance_invoice"]
     try:
@@ -134,6 +147,12 @@ try:
     refund = {"id": "WH-" + uuid.uuid4().hex, "event_type": "PAYMENT.CAPTURE.REFUNDED",
               "resource": {"supplementary_data": {"related_ids": {"order_id": tab_order}}}}
     assert post("/api/paypal/webhook", refund)["result"] == "refunded, slot released"
-    print("e2e ok:", b["id"], b["slot"], "deposit", b["deposit"], "of", q["total"], "| webhook booking + restart + refund + balance invoice ok")
+    if precedent.URL:  # the booking joined the job history, then the dive results landed on it
+        h = precedent._es("GET", f"/{precedent.INDEX}/_doc/{b['id']}")["_source"]
+        assert h["status"] == "completed" and h["actual_hours"] == 5.5 and not h["demo"] and h["deposit"] == q["deposit"], h
+        assert precedent._es("GET", f"/{precedent.INDEX}/_doc/{late['state']['booking']['id']}")["_source"]["status"] == "booked"
+        for bid in (b["id"], late["state"]["booking"]["id"]):
+            precedent._es("DELETE", f"/{precedent.INDEX}/_doc/{bid}?refresh=true")
+    print("e2e ok:", b["id"], b["slot"], "deposit", b["deposit"], "of", q["total"], "| webhook booking + restart + refund + balance invoice ok | past jobs:", past["source"])
 finally:
     stop(srv)

@@ -1,0 +1,251 @@
+{
+ "title": "Pierside operator dashboard",
+ "description": "Bookings, PayPal deposits and rate-card accuracy from pierside-job-history (seeded demo jobs + sandbox bookings).",
+ "time_range": {
+  "from": "now-2y",
+  "to": "now"
+ },
+ "panels": [
+  {
+   "type": "markdown",
+   "grid": {
+    "x": 0,
+    "y": 0,
+    "w": 18,
+    "h": 8
+   },
+   "config": {
+    "settings": {
+     "open_links_in_new_tab": true
+    },
+    "content": "### Pierside operator dashboard\nJobs marked `demo` are **seeded demo data** generated from the rate card, not real customers. Paid sandbox bookings join them through the after_payment Render Workflow, and the operator's actual dive hours and findings land at dive complete. Every panel is one ES|QL query over `pierside-job-history`, the same index the booking agent searches for similar past jobs."
+   }
+  },
+  {
+   "type": "vis",
+   "grid": {
+    "x": 18,
+    "y": 0,
+    "w": 10,
+    "h": 8
+   },
+   "config": {
+    "type": "metric",
+    "title": "Quotes that paid a deposit",
+    "data_source": {
+     "type": "esql",
+     "query": "FROM pierside-job-history | STATS quotes = COUNT(*), paid = COUNT(deposit) | EVAL conversion = paid / quotes::double"
+    },
+    "metrics": [
+     {
+      "type": "primary",
+      "column": "conversion",
+      "label": "conversion",
+      "format": {
+       "type": "percent",
+       "decimals": 0
+      }
+     },
+     {
+      "type": "secondary",
+      "column": "quotes",
+      "label": "quotes"
+     }
+    ]
+   }
+  },
+  {
+   "type": "vis",
+   "grid": {
+    "x": 28,
+    "y": 0,
+    "w": 10,
+    "h": 8
+   },
+   "config": {
+    "type": "metric",
+    "title": "Deposits taken (PayPal)",
+    "data_source": {
+     "type": "esql",
+     "query": "FROM pierside-job-history | STATS deposits = SUM(deposit), paid = COUNT(deposit)"
+    },
+    "metrics": [
+     {
+      "type": "primary",
+      "column": "deposits",
+      "label": "deposits",
+      "format": {
+       "type": "number",
+       "decimals": 0,
+       "suffix": " USD"
+      }
+     },
+     {
+      "type": "secondary",
+      "column": "paid",
+      "label": "paid jobs"
+     }
+    ]
+   }
+  },
+  {
+   "type": "vis",
+   "grid": {
+    "x": 38,
+    "y": 0,
+    "w": 10,
+    "h": 8
+   },
+   "config": {
+    "type": "metric",
+    "title": "Dive hours over the rate card",
+    "data_source": {
+     "type": "esql",
+     "query": "FROM pierside-job-history | WHERE status == \"completed\" AND actual_hours IS NOT NULL | STATS overrun = SUM(actual_hours) / SUM(est_hours) - 1, dives = COUNT(*)"
+    },
+    "metrics": [
+     {
+      "type": "primary",
+      "column": "overrun",
+      "label": "over the rate card",
+      "format": {
+       "type": "percent",
+       "decimals": 0
+      }
+     },
+     {
+      "type": "secondary",
+      "column": "dives",
+      "label": "completed dives"
+     }
+    ]
+   }
+  },
+  {
+   "type": "vis",
+   "grid": {
+    "x": 0,
+    "y": 8,
+    "w": 28,
+    "h": 14
+   },
+   "config": {
+    "type": "xy",
+    "title": "Deposits by month",
+    "layers": [
+     {
+      "type": "bar",
+      "data_source": {
+       "type": "esql",
+       "query": "FROM pierside-job-history | WHERE deposit IS NOT NULL | STATS deposits = SUM(deposit) BY month = DATE_TRUNC(1 month, date) | SORT month"
+      },
+      "x": {
+       "column": "month"
+      },
+      "y": [
+       {
+        "column": "deposits",
+        "label": "deposits (USD)"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "type": "vis",
+   "grid": {
+    "x": 28,
+    "y": 8,
+    "w": 20,
+    "h": 14
+   },
+   "config": {
+    "type": "xy",
+    "title": "Jobs by asset: paid vs quote only",
+    "legend": {
+     "placement": "inside",
+     "position": "top_right",
+     "visibility": "visible"
+    },
+    "layers": [
+     {
+      "type": "bar_stacked",
+      "data_source": {
+       "type": "esql",
+       "query": "FROM pierside-job-history | EVAL outcome = CASE(deposit IS NOT NULL, \"paid deposit\", \"quote only\") | STATS jobs = COUNT(*) BY asset_type, outcome"
+      },
+      "x": {
+       "column": "asset_type",
+       "label": "asset"
+      },
+      "y": [
+       {
+        "column": "jobs"
+       }
+      ],
+      "breakdown_by": {
+       "column": "outcome"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "type": "vis",
+   "grid": {
+    "x": 0,
+    "y": 22,
+    "w": 48,
+    "h": 15
+   },
+   "config": {
+    "type": "data_table",
+    "title": "Rate card vs actual dive hours, by water conditions",
+    "data_source": {
+     "type": "esql",
+     "query": "FROM pierside-job-history | WHERE status == \"completed\" AND actual_hours IS NOT NULL | STATS dives = COUNT(*), rate_card_h = SUM(est_hours), actual_h = SUM(actual_hours) BY visibility, fouling | EVAL overrun = actual_h / rate_card_h - 1 | SORT overrun DESC"
+    },
+    "rows": [
+     {
+      "column": "visibility"
+     },
+     {
+      "column": "fouling",
+      "label": "marine growth"
+     }
+    ],
+    "metrics": [
+     {
+      "column": "dives",
+      "summary": {
+       "type": "sum"
+      }
+     },
+     {
+      "column": "rate_card_h",
+      "label": "rate card hours",
+      "summary": {
+       "type": "sum"
+      }
+     },
+     {
+      "column": "actual_h",
+      "label": "actual dive hours",
+      "summary": {
+       "type": "sum"
+      }
+     },
+     {
+      "column": "overrun",
+      "label": "over the rate card",
+      "format": {
+       "type": "percent",
+       "decimals": 0
+      }
+     }
+    ]
+   }
+  }
+ ]
+}

@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse
 
 import jobs
 import paypal
+import precedent
 import pricing
 from jobs import MOCK_AI, client
 
@@ -84,6 +85,9 @@ reasonable assumption, say it out loud, and use "unknown" for fouling.
 worth a closer look) and use it to set fouling and visibility.
 - Never state, estimate or change a price yourself. Always call price_quote and repeat its numbers \
 exactly. Re-quote whenever the scope changes.
+- With your first price_quote, also call search_similar_sites (same scope, plus the customer's own \
+words about the site). If it finds a past job, mention the closest one in one sentence (where, and \
+what the crew found) and say it is demo data. Past jobs never change the price.
 - After the quote, call list_slots and offer two or three options. When the customer picks one, \
 call hold_slot. Then tell them to pay the deposit with the PayPal button on the job sheet.
 - You cannot take payment or confirm a booking. The server books the slot only after PayPal \
@@ -114,6 +118,26 @@ TOOLS = [
                 "addons": {"type": "array", "items": {"type": "string", "enum": ["photogrammetry_model", "cp_readings"]}},
                 "rush": {"type": "boolean", "description": "slot needed within 3 business days"},
                 "site_name": {"type": "string", "description": "short site description, e.g. 'Quincy marina, A dock'"},
+            },
+        },
+    },
+    {
+        "name": "search_similar_sites",
+        "description": "Find up to 3 completed past jobs most like this one: same asset type, similar size, depth, "
+                       "visibility and growth, and site notes that mean the same thing. Each has what the crew found "
+                       "and the hours the dive took. Context for the customer only, never a price.",
+        "strict": True,
+        "input_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["asset_type", "quantity", "max_depth_ft", "visibility", "fouling", "site_notes"],
+            "properties": {
+                "asset_type": {"type": "string", "enum": ["hull", "pilings", "seawall", "mooring"]},
+                "quantity": {"type": "number"},
+                "max_depth_ft": {"type": "number"},
+                "visibility": {"type": "string", "enum": ["good", "fair", "poor"]},
+                "fouling": {"type": "string", "enum": ["light", "moderate", "heavy", "unknown"]},
+                "site_notes": {"type": "string", "description": "the customer's words about the site, its growth and their worries"},
             },
         },
     },
@@ -170,6 +194,9 @@ def run_tool(sid, s, name, args):
             s["slot"] = None
             q["note"] = "Held slot released: it needs rush=true."
         return q
+    if name == "search_similar_sites":
+        s["precedent"] = precedent.search(**args)
+        return s["precedent"]
     if name == "list_slots":
         return {"slots": open_slots(sid)[:8]}
     if name == "hold_slot":
@@ -249,7 +276,7 @@ def rate_limit(request):
 
 
 def public_state(s):
-    return {k: s[k] for k in ("quote", "scope", "slot", "booking")}
+    return {k: s.get(k) for k in ("quote", "scope", "slot", "booking", "precedent")}
 
 
 app = FastAPI()
@@ -354,7 +381,8 @@ def finalize(sid, s):
                  f"for ${cap['amount']}. Booking {bid} confirmed for {slot['label']}. "
                  f"Balance ${q['balance']:.2f} is due after the inspection; PayPal will invoice it.")
         job = {"quote": q, "booking": dict(b), "payer_email": cap["payer_email"],
-               "plan_request": plan_request(s, event + " Write the pre-dive plan.")}
+               "plan_request": plan_request(s, event + " Write the pre-dive plan."),
+               "history": precedent.booking_doc(bid, s["scope"], q)}
         add_user(s, [{"type": "text", "text": event}])
         s["messages"].append({"role": "assistant", "content": [{"type": "text", "text": ack(b)}]})
         s["history"].append({"who": "bot", "text": ack(b), "tools": []})
@@ -448,9 +476,13 @@ def webhook(event: dict, request: Request):
 
 @app.post("/api/ops/complete")
 def complete_dive(body: dict, request: Request):
-    """The operator marks a dive done; a workflow task emails the customer the PayPal balance invoice."""
+    """The operator marks a dive done; a workflow task emails the customer the PayPal balance invoice.
+    Optional actual_hours and findings go to the job history that search_similar_sites ranks."""
     if not OPS_TOKEN or not hmac.compare_digest(request.headers.get("authorization", "").encode(), f"Bearer {OPS_TOKEN}".encode()):
         raise HTTPException(401, "operator token required")
+    hours, findings = body.get("actual_hours"), str(body.get("findings") or "")[:1000]
+    if hours is not None and not (isinstance(hours, (int, float)) and 0 < hours < 100):
+        raise HTTPException(422, "actual_hours must be a number of hours, more than 0 and under 100")
     row = db("SELECT session_id FROM bookings WHERE id = ? AND status = 'confirmed'", str(body.get("booking_id", "")))
     if not row:
         raise HTTPException(404, "no confirmed booking with that id")
@@ -466,4 +498,9 @@ def complete_dive(body: dict, request: Request):
             raise HTTPException(502, str(e)[:200])
         b["dive"] = "complete"
         save(sid, s)
+    try:  # history only: the invoice already went out
+        precedent.index_job(b["id"], {"status": "completed", **({"actual_hours": float(hours)} if hours else {}),
+                                      **({"findings": findings} if findings else {})})
+    except Exception as e:
+        print("job history not updated:", e, flush=True)
     return {"booking": b}

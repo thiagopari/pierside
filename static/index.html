@@ -56,6 +56,8 @@
   .booked b { display: block; font-size: 16px; margin-bottom: 4px; }
   .plan { margin-top: 10px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); font-size: 13px; white-space: pre-wrap; }
   .plan h4 { margin: 0 0 6px; font-size: 13px; }
+  .past div { margin-top: 6px; }
+  .past small { color: var(--muted); }
   .note { font-size: 12px; color: var(--muted); margin-top: 10px; }
   .err { color: #a32020; font-size: 13px; margin-top: 8px; }
 </style>
@@ -97,6 +99,7 @@
     <h2>Job sheet</h2>
     <p class="sub" id="quoteId">No quote yet: the agent fills this in.</p>
     <div id="lines"><div class="empty">Line items appear here once the job is scoped.</div></div>
+    <div id="similar"></div>
     <div id="slot"></div>
     <div id="pay"></div>
     <div id="err" class="err"></div>
@@ -149,6 +152,17 @@ function render() {
     $("lines").replaceChildren(t, el("p", "scope",
       `Scope: ${sc.quantity} × ${sc.asset_type}, max ${sc.max_depth_ft} ft, ${sc.visibility} visibility, ${sc.fouling} fouling, ${sc.distance_miles} mi` +
       (sc.addons.length ? `, + ${sc.addons.join(", ")}` : "") + (sc.rush ? ", rush" : "")));
+  }
+  const p = state.precedent;
+  $("similar").replaceChildren();
+  if (p && p.jobs.length) {  // context from search_similar_sites; the price above is the rate card's alone
+    const box = el("div", "plan past");
+    box.append(el("h4", null, `Similar past jobs · demo data · ${p.source.split(" (")[0]}`));
+    p.jobs.forEach((j) => {
+      const d = el("div", null, `${j.site}: ${j.quantity} × ${j.asset_type}, ${j.max_depth_ft} ft. Rate card ${j.est_hours} h, dive took ${j.actual_hours} h`);
+      d.append(el("br"), el("small", null, j.findings)); box.append(d);
+    });
+    $("similar").append(box);
   }
   $("slot").replaceChildren();
   if (s) { const r = el("div", "row"); r.append(el("span", null, "Dive slot"), el("b", null, s.label)); $("slot").append(r); }

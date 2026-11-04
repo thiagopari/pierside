@@ -38,6 +38,10 @@ services:
         sync: false
       - key: OPS_TOKEN  # bearer token for POST /api/ops/complete (operator marks a dive done)
         generateValue: true
+      - key: ELASTIC_URL  # optional: similar past jobs + job history; unset = local fallback
+        sync: false
+      - key: ELASTIC_API_KEY
+        sync: false
 
   - type: workflow  # Render Workflows: jobs.py tasks, each run on its own instance with retries
     name: pierside-jobs
@@ -55,4 +59,8 @@ services:
       - key: PAYPAL_CLIENT_SECRET
         sync: false
       - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ELASTIC_URL  # index_job writes paid bookings to the job history
+        sync: false
+      - key: ELASTIC_API_KEY
         sync: false

@@ -24,7 +24,9 @@ Try: "12 wooden pilings at our marina in Quincy, about 25 ft deep", answer the a
 | Book it | Server code | Captures the order, then checks that the status is `COMPLETED` and the amount equals the deposit. Only then does it book the slot |
 | Balance | PayPal **Invoicing v2** | Drafts an invoice for the remaining 70%, with the deposit shown as paid. When the operator marks the dive complete, PayPal emails it to the customer and the job sheet links to the pay page |
 | Follow-up | Claude | Gets a server-generated PAYMENT EVENT and writes a pre-dive plan for that site, shown on the job sheet |
-| Background work | **Render Workflows** ([`jobs.py`](jobs.py)) | After payment, `after_payment` runs `draft_invoice` and `pre_dive_plan` in parallel, each on its own instance with retries. The buyer and PayPal get their answer in about a second |
+| Similar past jobs | Claude + **Elasticsearch** ([`precedent.py`](precedent.py)) | With the first quote the agent calls `search_similar_sites`: a hybrid search over the job history (BM25 on the crew's findings plus ELSER semantic search, fused with RRF), filtered to the same kind of asset. The job sheet shows the three closest jobs with rate-card vs actual dive hours. **The past jobs are seeded demo data** and are labeled as such everywhere. They never change the price |
+| Operator dashboard | **Elasticsearch ES\|QL** + Kibana ([`elastic/dashboard.json`](elastic/dashboard.json)) | Paid bookings join the job history, and the operator's actual dive hours and findings land on them at dive complete. Seven ES\|QL panels: quote-to-deposit conversion, deposits taken, and how far real dives run over the rate card in each kind of water |
+| Background work | **Render Workflows** ([`jobs.py`](jobs.py)) | After payment, `after_payment` runs `draft_invoice`, `pre_dive_plan` and `index_job` (job history) in parallel, each on its own instance with retries. The buyer and PayPal get their answer in about a second |
 
 The split is the point: **the LLM handles the conversation, and money moves only through deterministic, verified code paths.** A prompt-injected or confused agent cannot discount a job, invent a price, or book an unpaid slot.
 
@@ -32,13 +34,15 @@ The split is the point: **the LLM handles the conversation, and money moves only
 
 ```
 browser (static/index.html)
-  ├─ POST /api/chat    → Claude tool loop (app.py) → price_quote / list_slots / hold_slot
+  ├─ POST /api/chat    → Claude tool loop (app.py) → price_quote / search_similar_sites / list_slots / hold_slot
+  │                                                    search_similar_sites → Elasticsearch hybrid search (or local ranking)
   ├─ PayPal JS SDK     → createOrder → POST /api/order   → PayPal Orders v2: create
   │                      onApprove   → POST /api/capture → PayPal Orders v2: capture + verify
   │                                                       → book slot → reply "Deposit received"
   │                                                       → Render Workflow after_payment (background thread waits):
   │                                                           ├─ draft_invoice  → PayPal Invoicing v2: draft balance
-  │                                                           └─ pre_dive_plan  → Claude: pre-dive plan → job sheet
+  │                                                           ├─ pre_dive_plan  → Claude: pre-dive plan → job sheet
+  │                                                           └─ index_job      → Elasticsearch: job history
   └─ job sheet: live quote lines, slot, deposit button, booking card
 
 PayPal webhooks → POST /api/paypal/webhook → verify signature with PayPal → skip duplicates
@@ -46,15 +50,40 @@ PayPal webhooks → POST /api/paypal/webhook → verify signature with PayPal �
   └─ PAYMENT.CAPTURE.REFUNDED / REVERSED / DENIED        → booking status updated, slot released
 
 operator → POST /api/ops/complete (OPS_TOKEN) → Render Workflow send_invoice → PayPal emails the balance invoice
+                                              → Elasticsearch: actual dive hours + findings → Kibana dashboard
 
 SQLite (Render disk): sessions + chat history, orders, bookings, webhook events
 ```
 
 **Payment safety:** the browser and the webhook both go through one capture-and-book function. It is idempotent: it checks the order with PayPal before capturing, sends a `PayPal-Request-Id`, and returns the existing booking if the other path got there first. A database constraint allows one confirmed booking per slot. The page keeps its job id in the browser, so a reload or a reopened tab shows the same job.
 
-About 800 lines of Python and one HTML page. PayPal is called over plain REST with the standard library ([`paypal.py`](paypal.py)). Claude is called with the official `anthropic` SDK.
+About 1,000 lines of Python and one HTML page. PayPal and Elasticsearch are called over plain REST with the standard library ([`paypal.py`](paypal.py), [`precedent.py`](precedent.py)). Claude is called with the official `anthropic` SDK.
 
 **Demo guardrails:** Haiku model, low effort, a per-IP hourly limit, a global daily cap on model calls, 25 messages per chat, a capped tool loop, client-side photo downscaling to 1024 px, and a spend limit on the API key.
+
+## Elastic: similar past jobs and the operator dashboard
+
+![Operator dashboard in Kibana, over seeded demo data](docs/screens/6_elastic_dashboard.png)
+
+The index `pierside-job-history` holds 80 seeded demo jobs (`precedent.demo_jobs()`, fixed seed, `demo: true`) plus every paid sandbox booking (`demo: false`). The demo jobs are generated so that murky, heavily fouled and deep dives run over the rate card, which is what the dashboard's bottom table shows an operator. Without `ELASTIC_URL`, or when Elastic errors, `search_similar_sites` ranks the same demo jobs in Python, the job sheet says "local fallback", and nothing is indexed. Quotes and bookings never depend on Elastic. The hosted demo runs without Elastic for now.
+
+Local cluster (Elasticsearch and Kibana 9.5.5 in Docker; the trial license enables ELSER semantic search for 30 days):
+
+```bash
+docker network create pierside-es
+docker run -d --name pierside-es --net pierside-es -p 127.0.0.1:9200:9200 -e discovery.type=single-node \
+  -e xpack.security.enabled=false -e xpack.license.self_generated.type=trial -e ES_JAVA_OPTS="-Xms1g -Xmx1g" \
+  docker.elastic.co/elasticsearch/elasticsearch:9.5.5
+docker run -d --name pierside-kibana --net pierside-es -p 127.0.0.1:5601:5601 -e ELASTICSEARCH_HOSTS=http://pierside-es:9200 \
+  -e TELEMETRY_OPTIN=false -e XPACK_SECURITY_SHOWINSECURECLUSTERWARNING=false docker.elastic.co/kibana/kibana:9.5.5
+export ELASTIC_URL=http://localhost:9200
+.venv/bin/python precedent.py seed     # creates the index and loads the demo jobs (ELSER embeds the findings)
+.venv/bin/python precedent.py report   # every dashboard panel as a text table
+curl -X PUT localhost:5601/api/dashboards/pierside-ops -H 'kbn-xsrf: 1' -H 'Content-Type: application/json' \
+  -d @elastic/dashboard.json         # then open http://localhost:5601/app/dashboards#/view/pierside-ops
+```
+
+For a hosted cluster, set `ELASTIC_URL` and `ELASTIC_API_KEY` (sent as `Authorization: ApiKey`). If seeding fails with "Failed to load inference endpoint", check the disk: Elasticsearch stops allocating shards on a disk over 90% full.
 
 ## Run locally
 
@@ -82,15 +111,18 @@ WORKFLOW_SLUG=pierside-jobs RENDER_USE_LOCAL_DEV=1 .venv/bin/uvicorn app:app
                               # plus double-booking, forged-order, webhook (closed tab), duplicate-event,
                               # restart-persistence, refund and dive-complete (balance invoice) checks
                               # (add WORKFLOW_SLUG + RENDER_USE_LOCAL_DEV=1 to run it through `render workflows dev`)
+.venv/bin/python precedent.py # demo jobs + local past-job ranking self-check
+ELASTIC_URL=http://localhost:9200 .venv/bin/python test_e2e.py   # the same e2e with past jobs and job history in Elasticsearch
 ```
 
 ## Deploy
 
-`render.yaml` is a Render Blueprint: an always-on web service with a 1 GB disk for the SQLite file, plus the `pierside-jobs` workflow service that runs `jobs.py`. Set `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `ANTHROPIC_API_KEY`, `PAYPAL_WEBHOOK_ID` and `RENDER_API_KEY` in the dashboard; Render generates `OPS_TOKEN`. To mark a dive complete: `curl -X POST https://<your-service>/api/ops/complete -H "Authorization: Bearer $OPS_TOKEN" -H 'Content-Type: application/json' -d '{"booking_id": "PS-..."}'`. Register the webhook (URL `https://<your-service>/api/paypal/webhook`) in the PayPal developer dashboard or with `POST /v1/notifications/webhooks`; the server rejects every webhook until `PAYPAL_WEBHOOK_ID` is set.
+`render.yaml` is a Render Blueprint: an always-on web service with a 1 GB disk for the SQLite file, plus the `pierside-jobs` workflow service that runs `jobs.py`. Set `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `ANTHROPIC_API_KEY`, `PAYPAL_WEBHOOK_ID` and `RENDER_API_KEY` in the dashboard; Render generates `OPS_TOKEN`. For Elastic, set `ELASTIC_URL` and `ELASTIC_API_KEY` on both services (the web service searches and records dive results; the workflow indexes bookings). To mark a dive complete: `curl -X POST https://<your-service>/api/ops/complete -H "Authorization: Bearer $OPS_TOKEN" -H 'Content-Type: application/json' -d '{"booking_id": "PS-...", "actual_hours": 5.5, "findings": "..."}'` (hours and findings are optional; they go to the job history). Register the webhook (URL `https://<your-service>/api/paypal/webhook`) in the PayPal developer dashboard or with `POST /v1/notifications/webhooks`; the server rejects every webhook until `PAYPAL_WEBHOOK_ID` is set.
 
 ## Notes
 
 - The company, rate card and prices are illustrative. Payments run in the PayPal sandbox only.
+- The past jobs behind the precedent search and the dashboard are seeded demo data, labeled `demo` in the index, on the job sheet and in the agent's replies.
 - Slot holds (15 minutes) live in memory and can be lost on a restart; bookings cannot. One instance only: SQLite with one connection.
 
 ## License

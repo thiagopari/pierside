@@ -1,7 +1,8 @@
 """Render Workflows: the slow, retryable work around a booking, off the request path.
 
-after_payment fans out two tasks in parallel, each on its own Render compute with retries:
-draft the PayPal balance invoice and write the pre-dive plan. send_invoice emails the
+after_payment fans out three tasks in parallel, each on its own Render compute with retries:
+draft the PayPal balance invoice, write the pre-dive plan, and add the booking to the job history
+in Elasticsearch (a no-op without ELASTIC_URL). send_invoice emails the
 customer that invoice once the operator marks the dive complete.
 
 On Render this file is the workflow service (python jobs.py). app.py starts the tasks by
@@ -13,6 +14,7 @@ import asyncio, inspect, os
 from render.workflows import Retry, Workflows
 
 import paypal
+import precedent
 
 MOCK_AI = paypal.MOCK if os.environ.get("MOCK", "auto") != "auto" else not os.environ.get("ANTHROPIC_API_KEY")
 if os.environ.get("MOCK") == "0" and not os.environ.get("ANTHROPIC_API_KEY"):
@@ -44,11 +46,17 @@ def pre_dive_plan(ctx, request):
     return text
 
 
+@app.task(retry=Retry(max_retries=1, wait_duration_ms=1000), timeout_seconds=40)  # short: the plan waits on it
+def index_job(ctx, doc_id, doc):
+    precedent.index_job(doc_id, doc)
+
+
 @app.task(retry=Retry(max_retries=0, wait_duration_ms=0))  # its subtasks retry on their own
 async def after_payment(ctx, job):
-    inv, plan = await asyncio.gather(
+    inv, plan, _ = await asyncio.gather(  # a failed index_job is ignored: history is not the booking
         ctx.run(draft_invoice, job["quote"], job["booking"], job["payer_email"]),
-        ctx.run(pre_dive_plan, job["plan_request"]), return_exceptions=True)
+        ctx.run(pre_dive_plan, job["plan_request"]),
+        ctx.run(index_job, job["booking"]["id"], job["history"]), return_exceptions=True)
     failed = lambda r: isinstance(r, BaseException)
     return {"invoice_id": None if failed(inv) else inv, "invoice_error": str(inv)[:200] if failed(inv) else None,
             "plan": None if failed(plan) else plan}
