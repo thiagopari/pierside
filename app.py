@@ -187,6 +187,8 @@ def open_slots(session_id):
 
 
 def run_tool(sid, s, name, args):
+    if s["booking"] and name in ("price_quote", "hold_slot"):  # a paid job keeps its price and slot
+        return {"error": f"already booked as {s['booking']['id']}: its price and slot are fixed. Another job needs a new chat."}
     if name == "price_quote":
         q = pricing.quote(args)
         s["scope"], s["quote"] = args, {**q, "id": "Q-" + uuid.uuid4().hex[:8].upper()}

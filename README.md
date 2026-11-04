@@ -36,7 +36,7 @@ Try: "12 wooden pilings at our marina in Quincy, about 25 ft deep", answer the a
 | Book it | Server code | Captures the order, then checks that the status is `COMPLETED` and the amount equals the deposit. Only then does it book the slot |
 | Balance | PayPal **Invoicing v2** | Drafts an invoice for the remaining 70%, with the deposit shown as paid. When the operator marks the dive complete, PayPal emails it to the customer and the job sheet links to the pay page |
 | Follow-up | Claude | Gets a server-generated PAYMENT EVENT and writes a pre-dive plan for that site, shown on the job sheet |
-| Similar past jobs | Claude + **Elasticsearch** ([`precedent.py`](precedent.py)) | With the first quote the agent calls `search_similar_sites`: a hybrid search over the job history (BM25 on the crew's findings plus ELSER semantic search, fused with RRF), filtered to the same kind of asset. The job sheet shows the three closest jobs with rate-card vs actual dive hours. **The past jobs are seeded demo data** and are labeled as such everywhere. They never change the price |
+| Similar past jobs | Claude + **Elasticsearch** ([`precedent.py`](precedent.py)) | With the first quote the agent calls `search_similar_sites`: a hybrid search over the job history (BM25 on the crew's findings plus semantic search on a `semantic_text` field, fused with RRF; Jina embeddings v5 on the hosted Elastic Cloud project, ELSER on a local cluster), filtered to the same kind of asset. The job sheet shows the three closest jobs with rate-card vs actual dive hours. **The past jobs are seeded demo data** and are labeled as such everywhere. They never change the price |
 | Operator dashboard | **Elasticsearch ES\|QL** + Kibana ([`elastic/dashboard.json`](elastic/dashboard.json)) | Paid bookings join the job history, and the operator's actual dive hours and findings land on them at dive complete. Seven ES\|QL panels: quote-to-deposit conversion, deposits taken, and how far real dives run over the rate card in each kind of water |
 | Background work | **Render Workflows** ([`jobs.py`](jobs.py)) | After payment, `after_payment` runs `draft_invoice`, `pre_dive_plan` and `index_job` (job history) in parallel, each on its own instance with retries. The buyer and PayPal get their answer in about a second |
 
@@ -77,7 +77,7 @@ About 1,000 lines of Python and two HTML pages. PayPal and Elasticsearch are cal
 
 ![Operator dashboard in Kibana, over seeded demo data](docs/screens/6_elastic_dashboard.png)
 
-The index `pierside-job-history` holds 80 seeded demo jobs (`precedent.demo_jobs()`, fixed seed, `demo: true`) plus every paid sandbox booking (`demo: false`). The demo jobs are generated so that murky, heavily fouled and deep dives run over the rate card, which is what the dashboard's bottom table shows an operator. Without `ELASTIC_URL`, or when Elastic errors, `search_similar_sites` ranks the same demo jobs in Python, the job sheet says "local fallback", and nothing is indexed. Quotes and bookings never depend on Elastic. The hosted demo runs without Elastic for now.
+The index `pierside-job-history` holds 80 seeded demo jobs (`precedent.demo_jobs()`, fixed seed, `demo: true`) plus every paid sandbox booking (`demo: false`). The demo jobs are generated so that murky, heavily fouled and deep dives run over the rate card, which is what the dashboard's bottom table shows an operator. Without `ELASTIC_URL`, or when Elastic errors, `search_similar_sites` ranks the same demo jobs in Python, the job sheet says "local fallback", and nothing is indexed. Quotes and bookings never depend on Elastic. The hosted demo searches an Elastic Cloud Serverless project (AWS us-east-1, next to the Render service).
 
 Local cluster (Elasticsearch and Kibana 9.5.5 in Docker; the trial license enables ELSER semantic search for 30 days):
 
@@ -95,7 +95,7 @@ curl -X PUT localhost:5601/api/dashboards/pierside-ops -H 'kbn-xsrf: 1' -H 'Cont
   -d @elastic/dashboard.json         # then open http://localhost:5601/app/dashboards#/view/pierside-ops
 ```
 
-For a hosted cluster, set `ELASTIC_URL` and `ELASTIC_API_KEY` (sent as `Authorization: ApiKey`). If seeding fails with "Failed to load inference endpoint", check the disk: Elasticsearch stops allocating shards on a disk over 90% full.
+For a hosted cluster, set `ELASTIC_URL` and `ELASTIC_API_KEY` (sent as `Authorization: ApiKey`). On Elastic Cloud Serverless, `semantic_text` embeds with Jina embeddings v5 on Elastic's own inference service (no Jina key), and the dashboard imports with the same `PUT /api/dashboards/pierside-ops`, sent to the project's Kibana URL. If seeding fails with "Failed to load inference endpoint", check the disk: Elasticsearch stops allocating shards on a disk over 90% full.
 
 ## Run locally
 
