@@ -259,7 +259,7 @@
     },
     {
       "name": "2. Operator marks the dive complete",
-      "description": "Only the operator's token can mark a dive done. Then a workflow task has PayPal email the balance invoice, and the actual dive hours go to the job history.",
+      "description": "Only the operator's token can mark a dive done. Then a workflow task has PayPal email the balance invoice, and the actual dive hours go to the job history. The bookings list behind the operator page (/ops) needs the same token.",
       "item": [
         {
           "name": "Mark dive complete without the operator token → 401",
@@ -463,6 +463,55 @@
                 "exec": [
                   "pm.test(\"the customer sees the balance invoice\", () =>",
                   "    pm.expect(pm.response.json().state.booking.balance_invoice.status).to.eql(\"SENT\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Bookings list without the operator token → 401",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/api/ops/bookings"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"401: operator token required\", () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Operator's bookings list (the /ops grid) shows the completed dive",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ops_token}}"
+              }
+            ],
+            "url": "{{base_url}}/api/ops/bookings"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const row = pm.response.json().bookings.find(b => b.id === pm.collectionVariables.get(\"booking_id\"));",
+                  "pm.test(\"the booking is listed: dive complete, balance invoice SENT\", () => {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(row, \"booking in the list\").to.be.an(\"object\");",
+                  "    pm.expect(row.state).to.eql(\"complete\");",
+                  "    pm.expect(row.invoice).to.eql(\"SENT\");",
+                  "});"
                 ]
               }
             }

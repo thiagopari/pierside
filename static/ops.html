@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pierside · Operator bookings</title>
+<script src="https://cdn.jsdelivr.net/npm/ag-grid-community@36.2.0/dist/ag-grid-community.min.js"></script>
+<style>
+  :root { --ink: #0d2236; --muted: #5b6b7b; --line: #dde4ea; --bg: #f3f6f8; --sea: #0f5c7a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--ink); background: var(--bg); }
+  header { padding: 14px 24px; background: var(--ink); color: #fff; }
+  header h1 { font-size: 18px; margin: 0; letter-spacing: .3px; }
+  header p { margin: 0; color: #b8c8d6; font-size: 13px; }
+  main { display: grid; gap: 12px; padding: 16px 24px; max-width: 1280px; margin: 0 auto; }
+  form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 12px; background: #fff; border: 1px solid var(--line); border-radius: 12px; }
+  input { flex: 1 1 160px; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; font: inherit; }
+  .btn { padding: 10px 14px; border: 0; border-radius: 8px; background: var(--sea); color: #fff; font: inherit; cursor: pointer; }
+  .btn:disabled { opacity: .5; cursor: default; }
+  #msg { margin: 0; font-size: 13px; color: var(--muted); }
+  #msg.err { color: #a32020; }
+  @media (max-width: 860px) { header, main { padding-left: 16px; padding-right: 16px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Pierside · Operator</h1>
+  <p>Booked dives, their state and the PayPal balance invoices. Select a booked dive to mark it complete.</p>
+</header>
+<main>
+  <form id="auth">
+    <input id="token" type="password" placeholder="Operator token" autocomplete="off" aria-label="Operator token">
+    <button class="btn">Load bookings</button>
+  </form>
+  <div id="grid"></div>
+  <form id="complete">
+    <b id="picked">Select a booked dive in the grid</b>
+    <input id="hours" type="number" step="0.5" min="0.5" max="99" placeholder="Hours on site" aria-label="Hours on site">
+    <input id="findings" maxlength="1000" placeholder="Findings, e.g. heavy mussels on the outer row" aria-label="Findings">
+    <button class="btn" id="done" disabled>Mark dive complete</button>
+  </form>
+  <p id="msg" role="status"></p>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let token = "", picked = null;
+try { token = sessionStorage.getItem("pierside-ops") || ""; } catch {}
+$("token").value = token;
+
+const say = (text, err) => { $("msg").textContent = text; $("msg").className = err ? "err" : ""; };
+const money = p => p.value == null ? "" : p.value.toLocaleString("en-US", {style: "currency", currency: "USD"});
+const grid = agGrid.createGrid($("grid"), {
+  theme: agGrid.themeQuartz.withParams({accentColor: "#0f5c7a", foregroundColor: "#0d2236", borderColor: "#dde4ea",
+                                        headerBackgroundColor: "#f3f6f8", fontFamily: "inherit"}),
+  columnDefs: [
+    {field: "id", headerName: "Booking", minWidth: 115},
+    {field: "slot", headerName: "Dive slot", minWidth: 160},
+    {field: "site", minWidth: 180},
+    {field: "asset_type", headerName: "Asset", minWidth: 90},
+    {field: "quantity", headerName: "Qty", minWidth: 65},
+    {field: "max_depth_ft", headerName: "Depth (ft)", minWidth: 95},
+    {field: "total", valueFormatter: money},
+    {field: "deposit", valueFormatter: money, minWidth: 95},
+    {field: "state", headerName: "Dive", minWidth: 95},
+    {field: "invoice", headerName: "Invoice", headerTooltip: "PayPal balance invoice", minWidth: 90, cellRenderer: p => {
+      const url = /^https:\/\//.test(p.data.invoice_url || "") && p.data.invoice_url, el = document.createElement(url ? "a" : "span");
+      el.textContent = p.value || "";
+      if (url) Object.assign(el, {href: url, target: "_blank", rel: "noopener"});
+      return el;
+    }},
+    {field: "created", headerName: "Booked", sort: "desc", minWidth: 140, cellDataType: "text",
+     valueFormatter: p => new Date(p.value).toLocaleString([], {month: "short", day: "numeric", hour: "numeric", minute: "2-digit"})},
+  ],
+  defaultColDef: {flex: 1, minWidth: 100, filter: true, floatingFilter: true},
+  rowData: [],
+  domLayout: "autoHeight",  // ponytail: renders every row; drop it for a fixed-height, virtualized grid past a few hundred bookings
+  rowSelection: {mode: "singleRow", checkboxes: false, enableClickSelection: true},
+  getRowId: p => p.data.id,
+  onSelectionChanged: e => pick(e.api.getSelectedRows()[0]),
+});
+
+function pick(row) {
+  picked = row;
+  $("picked").textContent = row ? `${row.id} · ${row.site}` : "Select a booked dive in the grid";
+  $("done").disabled = !row || row.state !== "booked";
+}
+
+async function api(path, body) {
+  const r = await fetch(path, {method: body ? "POST" : "GET", body: body && JSON.stringify(body),
+                               headers: {Authorization: "Bearer " + token, "Content-Type": "application/json"}});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(r.status === 401 ? "Wrong or missing operator token." : j.detail || r.statusText);
+  return j;
+}
+
+async function load() {
+  try {
+    const {bookings} = await api("/api/ops/bookings");
+    grid.setGridOption("rowData", bookings);
+    pick(picked && bookings.find(b => b.id === picked.id));
+    say(bookings.length + (bookings.length === 1 ? " booking" : " bookings"));
+  } catch (e) { say(e.message, true); }
+}
+
+$("auth").onsubmit = e => {
+  e.preventDefault();
+  token = $("token").value.trim();
+  try { sessionStorage.setItem("pierside-ops", token); } catch {}
+  load();
+};
+
+$("complete").onsubmit = async e => {
+  e.preventDefault();
+  $("done").disabled = true;
+  say("Sending the balance invoice…");
+  try {
+    const hours = $("hours").value;
+    const {booking} = await api("/api/ops/complete", {booking_id: picked.id, findings: $("findings").value,
+                                                      ...(hours && {actual_hours: Number(hours)})});
+    await load();
+    say(`${booking.id}: dive complete, balance invoice ${booking.balance_invoice.status}.`);
+  } catch (err) { say(err.message, true); pick(picked); }
+};
+
+if (token) load();
+</script>
+</body>
+</html>

@@ -287,6 +287,11 @@ def index():
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "index.html"))
 
 
+@app.get("/ops")
+def ops_page():  # the page is public; its data needs the operator token
+    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "ops.html"))
+
+
 @app.get("/api/config")
 def config():
     return {"paypal_client_id": paypal.CLIENT_ID, "mock_paypal": paypal.MOCK, "mock_ai": MOCK_AI, "model": MODEL}
@@ -474,12 +479,33 @@ def webhook(event: dict, request: Request):
     return {"ok": True, "result": result}
 
 
+def ops_auth(request):
+    if not OPS_TOKEN or not hmac.compare_digest(request.headers.get("authorization", "").encode(), f"Bearer {OPS_TOKEN}".encode()):
+        raise HTTPException(401, "operator token required")
+
+
+@app.get("/api/ops/bookings")
+def list_bookings(request: Request):
+    """Every booking, newest first, with its live state from the session: the operator's grid at /ops."""
+    ops_auth(request)
+    out = []
+    # ponytail: reads every booked session per call; add paging when bookings reach the thousands
+    for created, data in db("SELECT b.created, s.data FROM bookings b JOIN sessions s ON s.id = b.session_id ORDER BY b.created DESC"):
+        s = json.loads(data)
+        b, sc, inv = s["booking"], s["scope"], s["booking"].get("balance_invoice") or {}
+        out.append({"id": b["id"], "slot": b["slot"], "site": sc["site_name"], "asset_type": sc["asset_type"],
+                    "quantity": sc["quantity"], "max_depth_ft": sc["max_depth_ft"], "total": s["quote"]["total"],
+                    "deposit": float(b["deposit"]), "state": b.get("dive", "booked") if b["status"] == "confirmed" else b["status"],
+                    "invoice": inv.get("status") or ("DRAFT" if b.get("invoice_id") else None), "invoice_url": inv.get("url"),
+                    "created": dt.datetime.fromtimestamp(created, dt.timezone.utc).isoformat(timespec="seconds")})
+    return {"bookings": out}
+
+
 @app.post("/api/ops/complete")
 def complete_dive(body: dict, request: Request):
     """The operator marks a dive done; a workflow task emails the customer the PayPal balance invoice.
     Optional actual_hours and findings go to the job history that search_similar_sites ranks."""
-    if not OPS_TOKEN or not hmac.compare_digest(request.headers.get("authorization", "").encode(), f"Bearer {OPS_TOKEN}".encode()):
-        raise HTTPException(401, "operator token required")
+    ops_auth(request)
     hours, findings = body.get("actual_hours"), str(body.get("findings") or "")[:1000]
     if hours is not None and not (isinstance(hours, (int, float)) and 0 < hours < 100):
         raise HTTPException(422, "actual_hours must be a number of hours, more than 0 and under 100")

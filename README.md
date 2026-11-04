@@ -20,7 +20,7 @@ Try: "12 wooden pilings at our marina in Quincy, about 25 ft deep", answer the a
 | Criterion | Where to look |
 |---|---|
 | Technological implementation | [How PayPal and AI are used](#how-paypal-and-ai-are-used): PayPal Orders v2 + JS SDK, verified webhooks and Invoicing v2; Claude tool use with strict schemas; Render Workflows; Elasticsearch. The [tests](#tests), including a [Postman collection](postman/pierside.postman_collection.json) with negative cases, run on every push in [GitHub Actions](https://github.com/thiagopari/pierside/actions/workflows/api-tests.yml) |
-| Design | One conversation from the first message to a booked dive: [screens](docs/screens) of the chat, the live job sheet, PayPal checkout, the booking card and the phone layout. The operator side is there too: marking a dive complete sends the balance invoice, a refund releases the slot, and the [Kibana dashboard](#elastic-similar-past-jobs-and-the-operator-dashboard) compares real dives with the rate card |
+| Design | One conversation from the first message to a booked dive: [screens](docs/screens) of the chat, the live job sheet, PayPal checkout, the booking card and the phone layout. The operator side is there too: on the [operator page](#operator-page) (`/ops`, an AG Grid of every booking) marking a dive complete sends the balance invoice, a refund releases the slot, and the [Kibana dashboard](#elastic-similar-past-jobs-and-the-operator-dashboard) compares real dives with the rate card |
 | Potential impact | For contractors who inspect docks, pilings, seawalls and hulls, and the marinas and owners who hire them. It replaces the days of phone tag between the first call and a deposit (top of this page). Demonstrated: scope, price, verified deposit and booked slot in one chat, then the balance invoiced after the dive |
 | Innovation | The model talks; money moves only through deterministic, verified code. Folder 4 of the Postman collection tests it: with `MOCK=1` a scripted model plays a prompt-injected agent that asks `price_quote` for 50% off and grabs a rush slot at the normal price, and the server keeps the rate-card price and refuses the slot. Similar past jobs (Elastic hybrid search) inform the agent's notes and never change the price |
 | Presentation | Video: link coming. [Hosted demo](https://pierside.onrender.com) with the sandbox buyer above |
@@ -69,7 +69,7 @@ SQLite (Render disk): sessions + chat history, orders, bookings, webhook events
 
 **Payment safety:** the browser and the webhook both go through one capture-and-book function. It is idempotent: it checks the order with PayPal before capturing, sends a `PayPal-Request-Id`, and returns the existing booking if the other path got there first. A database constraint allows one confirmed booking per slot. The page keeps its job id in the browser, so a reload or a reopened tab shows the same job.
 
-About 1,000 lines of Python and one HTML page. PayPal and Elasticsearch are called over plain REST with the standard library ([`paypal.py`](paypal.py), [`precedent.py`](precedent.py)). Claude is called with the official `anthropic` SDK.
+About 1,000 lines of Python and two HTML pages. PayPal and Elasticsearch are called over plain REST with the standard library ([`paypal.py`](paypal.py), [`precedent.py`](precedent.py)). Claude is called with the official `anthropic` SDK.
 
 **Demo guardrails:** Haiku model, low effort, a per-IP hourly limit, a global daily cap on model calls, 25 messages per chat, a capped tool loop, client-side photo downscaling to 1024 px, and a spend limit on the API key.
 
@@ -115,19 +115,25 @@ WORKFLOW_SLUG=pierside-jobs RENDER_USE_LOCAL_DEV=1 .venv/bin/uvicorn app:app
 
 **One switch:** `MOCK=1` replaces the Claude client with a scripted fake (`fake_claude.py`) and the PayPal HTTP layer with an in-memory fake of the same Orders v2 endpoints. Everything else (agent loop, pricing, verification, booking) runs the same code as production. For the real thing, set `MOCK=0` and fill in a PayPal sandbox app's client ID and secret plus an Anthropic API key.
 
+## Operator page
+
+![Operator bookings grid (mock mode)](docs/screens/7_ops_grid.png)
+
+`/ops` is the dive operator's side: every booking in an [AG Grid Community](https://www.ag-grid.com/) table (sort and filter any column) with its dive state and the PayPal balance invoice, a draft until the dive and then sent with the customer's pay link. Select a booked dive, enter the hours on site and the findings, and **Mark dive complete** calls `POST /api/ops/complete`: PayPal emails the balance invoice and the row updates. The page asks for the operator token, the server's `OPS_TOKEN`. Locally, start the server with one (`MOCK=1 OPS_TOKEN=judge-ops .venv/bin/uvicorn app:app`) and open http://127.0.0.1:8000/ops with token `judge-ops`. The hosted demo's token stays private; the video shows its operator page.
+
 ## Tests
 
 ```bash
 .venv/bin/python pricing.py   # rate card self-check
 .venv/bin/python test_e2e.py  # boots the server with MOCK=1: chat → quote → hold → order → capture → booked,
                               # plus double-booking, forged-order, webhook (closed tab), duplicate-event,
-                              # restart-persistence, refund and dive-complete (balance invoice) checks
+                              # restart-persistence, refund, dive-complete (balance invoice) and bookings-list checks
                               # (add WORKFLOW_SLUG + RENDER_USE_LOCAL_DEV=1 to run it through `render workflows dev`)
 .venv/bin/python precedent.py # demo jobs + local past-job ranking self-check
 ELASTIC_URL=http://localhost:9200 .venv/bin/python test_e2e.py   # the same e2e with past jobs and job history in Elasticsearch
 ```
 
-The Postman collection [`postman/pierside.postman_collection.json`](postman/pierside.postman_collection.json) runs the API end to end with assertions, in four folders: a customer books a dive, the operator marks it complete (wrong token, bad hours, unknown booking, then the invoice), a closed tab is booked by the PayPal webhook (duplicate event, late capture, refund), and the guards (forged order ids, out-of-order calls, the prompt injection, bad input). Import it into Postman, or run it with Newman (26 requests, 33 assertions):
+The Postman collection [`postman/pierside.postman_collection.json`](postman/pierside.postman_collection.json) runs the API end to end with assertions, in four folders: a customer books a dive, the operator marks it complete (wrong token, bad hours, unknown booking, then the invoice) and finds it in the bookings list, a closed tab is booked by the PayPal webhook (duplicate event, late capture, refund), and the guards (forged order ids, out-of-order calls, the prompt injection, bad input). Import it into Postman, or run it with Newman (28 requests, 35 assertions):
 
 ```bash
 MOCK=1 OPS_TOKEN=judge-ops DB_PATH=:memory: .venv/bin/uvicorn app:app &

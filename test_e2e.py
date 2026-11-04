@@ -1,6 +1,6 @@
 """End-to-end over HTTP with MOCK=1: chat -> quote -> slot hold -> PayPal order -> capture -> booked,
-the same booking driven by a PayPal webhook instead (closed tab), bookings surviving a restart, and the
-operator's dive-complete call sending the balance invoice.
+the same booking driven by a PayPal webhook instead (closed tab), bookings surviving a restart, the
+operator's dive-complete call sending the balance invoice, and the operator's bookings list.
 With ELASTIC_URL set (seeded: python precedent.py seed), the past-jobs search and the job history run
 against Elasticsearch, and the test removes the bookings it indexed.
 Run: .venv/bin/python test_e2e.py   (jobs.py tasks run in-process)
@@ -33,8 +33,8 @@ def stop(p):
         print(err[-3000:])
 
 
-def get(path):
-    return json.loads(urllib.request.urlopen(f"http://127.0.0.1:{PORT}{path}").read())
+def get(path, **headers):
+    return json.loads(urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{PORT}{path}", headers=headers)).read())
 
 
 def booked(sid):
@@ -66,6 +66,7 @@ def post(path, body, **headers):
 try:
     assert cfg["mock_ai"] and cfg["mock_paypal"], cfg
     assert b"Job sheet" in urllib.request.urlopen(f"http://127.0.0.1:{PORT}/").read()
+    assert b"agGrid.createGrid" in urllib.request.urlopen(f"http://127.0.0.1:{PORT}/ops").read()
     sid = uuid.uuid4().hex
 
     r = post("/api/chat", {"session_id": sid, "message": "12 pilings in Quincy, 25 ft"})
@@ -148,12 +149,20 @@ try:
     refund = {"id": "WH-" + uuid.uuid4().hex, "event_type": "PAYMENT.CAPTURE.REFUNDED",
               "resource": {"supplementary_data": {"related_ids": {"order_id": tab_order}}}}
     assert post("/api/paypal/webhook", refund)["result"] == "refunded, slot released"
+    # the operator's grid (/ops) lists both bookings: one dive complete with its invoice sent, one refunded
+    try:
+        get("/api/ops/bookings")
+        raise AssertionError("the bookings list without the operator token must fail")
+    except urllib.error.HTTPError as e:
+        assert e.code == 401
+    rows = {x["id"]: x for x in get("/api/ops/bookings", **ops)["bookings"]}
+    assert rows[b["id"]]["state"] == "complete" and rows[b["id"]]["invoice"] == "SENT" and rows[late["state"]["booking"]["id"]]["state"] == "refunded", rows
     if precedent.URL:  # the booking joined the job history, then the dive results landed on it
         h = precedent._es("GET", f"/{precedent.INDEX}/_doc/{b['id']}")["_source"]
         assert h["status"] == "completed" and h["actual_hours"] == 5.5 and not h["demo"] and h["deposit"] == q["deposit"], h
         assert precedent._es("GET", f"/{precedent.INDEX}/_doc/{late['state']['booking']['id']}")["_source"]["status"] == "booked"
         for bid in (b["id"], late["state"]["booking"]["id"]):
             precedent._es("DELETE", f"/{precedent.INDEX}/_doc/{bid}?refresh=true")
-    print("e2e ok:", b["id"], b["slot"], "deposit", b["deposit"], "of", q["total"], "| webhook booking + restart + refund + balance invoice ok | past jobs:", past["source"])
+    print("e2e ok:", b["id"], b["slot"], "deposit", b["deposit"], "of", q["total"], "| webhook booking + restart + refund + balance invoice + ops list ok | past jobs:", past["source"])
 finally:
     stop(srv)
