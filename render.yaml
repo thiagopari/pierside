@@ -2,6 +2,7 @@ services:
   - type: web
     name: pierside
     runtime: python
+    region: virginia
     plan: starter  # always on (no cold starts for PayPal webhooks); covered by the hackathon credit
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
@@ -30,4 +31,28 @@ services:
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: PAYPAL_WEBHOOK_ID  # from POST /v1/notifications/webhooks; without it every webhook is rejected
+        sync: false
+      - key: WORKFLOW_SLUG  # the workflow service below; unset = jobs.py tasks run in-process
+        value: pierside-jobs
+      - key: RENDER_API_KEY  # lets the web service start task runs on the workflow service
+        sync: false
+      - key: OPS_TOKEN  # bearer token for POST /api/ops/complete (operator marks a dive done)
+        generateValue: true
+
+  - type: workflow  # Render Workflows: jobs.py tasks, each run on its own instance with retries
+    name: pierside-jobs
+    runtime: python
+    region: virginia
+    buildCommand: pip install -r requirements.txt
+    startCommand: python jobs.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.3
+      - key: MOCK
+        value: "0"
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: ANTHROPIC_API_KEY
         sync: false

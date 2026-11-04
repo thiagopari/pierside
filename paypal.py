@@ -119,6 +119,16 @@ def draft_balance_invoice(quote, booking, payer_email):
     return inv.get("id") or inv.get("href", "").rsplit("/", 1)[-1]
 
 
+def send_invoice(invoice_id):
+    """Email the drafted balance invoice to the customer. Safe to retry: PayPal refuses a second
+    send (422), so only a DRAFT is sent. Returns {status, url}; url is the customer's pay page."""
+    inv = _call("GET", f"/v2/invoicing/invoices/{invoice_id}")
+    if inv["status"] == "DRAFT":
+        _call("POST", f"/v2/invoicing/invoices/{invoice_id}/send", {"send_to_recipient": True, "send_to_invoicer": False})
+        inv["status"] = "SENT"
+    return {"status": inv["status"], "url": inv["detail"]["metadata"]["recipient_view_url"]}
+
+
 def _fake(method, path, body):
     """In-memory stand-in for the sandbox endpoints used above (response shapes per PayPal docs)."""
     if path == "/v1/oauth2/token":
@@ -142,4 +152,9 @@ def _fake(method, path, body):
         return o
     if method == "POST" and path == "/v2/invoicing/invoices":
         return {"rel": "self", "href": BASE + "/v2/invoicing/invoices/INV2-MOCK-" + uuid.uuid4().hex[:4].upper(), "method": "GET"}
+    if path.startswith("/v2/invoicing/invoices/INV2-MOCK-"):  # stateless: workflow tasks may run in separate processes
+        if method == "POST":
+            return {"rel": "payer-view", "href": "https://www.sandbox.paypal.com/invoice/p/#MOCK", "method": "GET"}
+        return {"id": path.split("/")[4], "status": "DRAFT",
+                "detail": {"metadata": {"recipient_view_url": "https://www.sandbox.paypal.com/invoice/p/#MOCK"}}}
     raise PayPalError(f"{method} {path} -> 404 (not faked)")

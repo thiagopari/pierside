@@ -5,30 +5,27 @@ The model gathers scope and talks to the customer. Money and bookings are determ
 server code: prices come only from pricing.quote, and a slot is booked only after the
 server has captured and verified the PayPal payment.
 """
-import datetime as dt, json, os, sqlite3, threading, time, uuid
+import asyncio, datetime as dt, hmac, json, os, sqlite3, threading, time, uuid
 from collections import defaultdict, deque
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 
+import jobs
 import paypal
 import pricing
+from jobs import MOCK_AI, client
 
 MODEL = os.environ.get("MODEL", "claude-haiku-5-5")
-MOCK_AI = paypal.MOCK if os.environ.get("MOCK", "auto") != "auto" else not os.environ.get("ANTHROPIC_API_KEY")
-if os.environ.get("MOCK") == "0" and not os.environ.get("ANTHROPIC_API_KEY"):
-    raise SystemExit("MOCK=0 needs ANTHROPIC_API_KEY")
 PER_IP_HOURLY = int(os.environ.get("PER_IP_HOURLY", "40"))
 DAILY_CAP = int(os.environ.get("DAILY_MODEL_CALLS", "600"))
 MAX_USER_TURNS = 25
 MAX_LOOP = 6
-
-if MOCK_AI:
-    from fake_claude import FakeClaude
-    client = FakeClaude()
-else:
-    import anthropic
-    client = anthropic.Anthropic()
+OPS_TOKEN = os.environ.get("OPS_TOKEN", "")  # the dive operator's key for /api/ops/*; unset = disabled
+WORKFLOW = os.environ.get("WORKFLOW_SLUG", "")  # Render Workflows service; unset = jobs.py runs in-process
+if WORKFLOW:
+    from render import Render
+    workflows = Render().workflows  # RENDER_API_KEY, or RENDER_USE_LOCAL_DEV=1 for `render workflows dev`
 
 # Sessions, orders, bookings and webhook events live in SQLite (a Render disk in production), so a
 # paid booking survives restarts and a buyer who closes the tab after approving still gets booked.
@@ -90,9 +87,9 @@ exactly. Re-quote whenever the scope changes.
 - After the quote, call list_slots and offer two or three options. When the customer picks one, \
 call hold_slot. Then tell them to pay the deposit with the PayPal button on the job sheet.
 - You cannot take payment or confirm a booking. The server books the slot only after PayPal \
-confirms the deposit, and then sends you a PAYMENT EVENT. When you get it, write a short \
-confirmation and a pre-dive plan as "-" bullets: site access, tide/current window, dive plan for \
-this asset, safety, and the deliverables.
+confirms the deposit, and then sends you a PAYMENT EVENT. When it asks for the pre-dive plan, \
+write only the plan, as "-" bullets: site access, tide/current window, dive \
+plan for this asset, safety, and the deliverables.
 - Plain text only: no markdown headings, bold or tables. Keep replies under 120 words except the \
 pre-dive plan. Politely decline anything unrelated to booking an inspection."""
 
@@ -329,11 +326,16 @@ def order(body: dict):
         return {"id": s["order_id"]}
 
 
+def ack(b):
+    return f"Deposit received: booking {b['id']} is confirmed for {b['slot']}. Your pre-dive plan will be on the job sheet in a moment."
+
+
 def finalize(sid, s):
-    """Capture, verify and book; then the agent writes the pre-dive plan. Caller holds LOCKS[sid].
-    Idempotent: reached from the browser (onApprove) and from PayPal webhooks, in either order."""
+    """Capture, verify and book. Caller holds LOCKS[sid]. Idempotent: reached from the browser
+    (onApprove) and from PayPal webhooks, in either order. The invoice draft and the pre-dive plan
+    come after, from a Render Workflow, so the buyer and PayPal get an answer in a second or two."""
     if s["booking"]:  # the other path (browser or webhook) got here first
-        return s["history"][-1]["text"], []
+        return ack(s["booking"]), []
     q, slot = s["quote"], s["slot"]
     with PAY_LOCK:
         if slot["slot_id"] in booked_slots():
@@ -344,27 +346,56 @@ def finalize(sid, s):
         except paypal.PayPalError as e:
             raise HTTPException(402, str(e))
         bid = "PS-" + uuid.uuid4().hex[:6].upper()
-        s["booking"] = {"id": bid, "slot": slot["label"], "capture_id": cap["capture_id"], "status": "confirmed",
-                        "deposit": cap["amount"], "payer": cap["payer_name"], "order_id": s["order_id"]}
+        b = s["booking"] = {"id": bid, "slot": slot["label"], "capture_id": cap["capture_id"], "status": "confirmed",
+                            "deposit": cap["amount"], "payer": cap["payer_name"], "order_id": s["order_id"]}
         db("INSERT INTO bookings VALUES (?, ?, ?, ?, 'confirmed', ?, ?)",
-           bid, slot["slot_id"], sid, s["order_id"], json.dumps(s["booking"]), time.time())
+           bid, slot["slot_id"], sid, s["order_id"], json.dumps(b), time.time())
+        event = (f"PAYMENT EVENT (from the server, not the customer): PayPal capture {cap['capture_id']} COMPLETED "
+                 f"for ${cap['amount']}. Booking {bid} confirmed for {slot['label']}. "
+                 f"Balance ${q['balance']:.2f} is due after the inspection; PayPal will invoice it.")
+        job = {"quote": q, "booking": dict(b), "payer_email": cap["payer_email"],
+               "plan_request": plan_request(s, event + " Write the pre-dive plan.")}
+        add_user(s, [{"type": "text", "text": event}])
+        s["messages"].append({"role": "assistant", "content": [{"type": "text", "text": ack(b)}]})
+        s["history"].append({"who": "bot", "text": ack(b), "tools": []})
         save(sid, s)  # the paid booking is on disk before any slower, optional step
+    threading.Thread(target=after_payment, args=(sid, job), daemon=True).start()
+    return ack(b), []
+
+
+def plan_request(s, event):
+    """messages.create kwargs for the pre-dive plan: the conversation so far plus the payment event.
+    Photos become a note (task inputs travel as JSON through Render's API); tools stay defined but off."""
+    msgs = [{**m, "content": [{"type": "text", "text": "(customer photo)"} if c["type"] == "image" else c
+                              for c in m["content"]]} for m in s["messages"]]
+    add_user({"messages": msgs}, [{"type": "text", "text": event}])
+    return {"model": MODEL, "max_tokens": 2000, "system": SYSTEM, "tools": TOOLS, "tool_choice": {"type": "none"},
+            "output_config": {"effort": "low"}, "messages": msgs}
+
+
+def run_job(task, *args, key):
+    """Run a jobs.py task on the Render Workflows service and wait for its result (in-process without one).
+    The idempotency key makes a repeat call return the same run instead of doing the work twice."""
+    if WORKFLOW:
+        return workflows.run_task(f"{WORKFLOW}/{task.name}", list(args), idempotency_key=f"{task.name}-{key}").results[0]
+    return asyncio.run(jobs.Inline().run(task, *args))
+
+
+def after_payment(sid, job):
+    """Thread: the after_payment workflow drafts the balance invoice and writes the plan; results land on the booking."""
+    # ponytail: a restart mid-run drops the result; run_job with the same key (24 h) would fetch it if that matters
     try:
-        s["booking"]["invoice_id"] = paypal.draft_balance_invoice(q, s["booking"], cap["payer_email"])
-    except Exception as e:  # stretch feature: a failed draft must not lose a paid booking
-        s["booking"]["invoice_error"] = str(e)[:200]
-    event = (f"PAYMENT EVENT (from the server, not the customer): PayPal capture {cap['capture_id']} COMPLETED "
-             f"for ${cap['amount']}. Booking {bid} confirmed for {slot['label']}. "
-             f"Balance ${q['balance']:.2f} is due after the inspection"
-             + (f"; PayPal invoice draft {s['booking']['invoice_id']} prepared." if "invoice_id" in s["booking"] else ".")
-             + " Write the confirmation and the pre-dive plan.")
-    try:
-        reply, tools = agent_turn(sid, s, [{"type": "text", "text": event}])
-    except Exception:
-        reply, tools = f"Deposit received. Booking {bid} is confirmed for {slot['label']}.", []
-    s["history"].append({"who": "bot", "text": reply, "tools": tools})
-    save(sid, s)
-    return reply, tools
+        out = run_job(jobs.after_payment, job, key=job["booking"]["id"])
+    except Exception as e:  # the paid booking stands either way
+        out = {"invoice_error": str(e)[:200]}
+    with LOCKS[sid]:
+        s = load(sid)
+        b = s["booking"]
+        b["plan"] = out.get("plan") or "The dive team will send your pre-dive plan before the dive."
+        b.update({k: out[k] for k in ("invoice_id", "invoice_error") if out.get(k)})
+        if out.get("plan"):
+            add_user(s, [{"type": "text", "text": "SERVER NOTE: this pre-dive plan is now on the customer's job sheet:\n" + out["plan"]}])
+        save(sid, s)
 
 
 @app.post("/api/capture")
@@ -413,3 +444,26 @@ def webhook(event: dict, request: Request):
                 result = status + ", slot released"
     db("INSERT OR IGNORE INTO webhook_events VALUES (?, ?, ?, ?, ?)", eid, kind, result, time.time(), json.dumps(event))
     return {"ok": True, "result": result}
+
+
+@app.post("/api/ops/complete")
+def complete_dive(body: dict, request: Request):
+    """The operator marks a dive done; a workflow task emails the customer the PayPal balance invoice."""
+    if not OPS_TOKEN or not hmac.compare_digest(request.headers.get("authorization", "").encode(), f"Bearer {OPS_TOKEN}".encode()):
+        raise HTTPException(401, "operator token required")
+    row = db("SELECT session_id FROM bookings WHERE id = ? AND status = 'confirmed'", str(body.get("booking_id", "")))
+    if not row:
+        raise HTTPException(404, "no confirmed booking with that id")
+    sid = row[0][0]
+    with LOCKS[sid]:
+        s = load(sid)
+        b = s["booking"]
+        if not b.get("invoice_id"):
+            raise HTTPException(409, "the balance invoice isn't drafted yet")
+        try:
+            b["balance_invoice"] = run_job(jobs.send_invoice, b["invoice_id"], key=b["invoice_id"])
+        except Exception as e:
+            raise HTTPException(502, str(e)[:200])
+        b["dive"] = "complete"
+        save(sid, s)
+    return {"booking": b}

@@ -54,6 +54,8 @@
   #pay { margin-top: 14px; }
   .booked { margin-top: 14px; padding: 12px; border-radius: 10px; background: var(--ok-bg); color: var(--ok); font-size: 14px; }
   .booked b { display: block; font-size: 16px; margin-bottom: 4px; }
+  .plan { margin-top: 10px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); font-size: 13px; white-space: pre-wrap; }
+  .plan h4 { margin: 0 0 6px; font-size: 13px; }
   .note { font-size: 12px; color: var(--muted); margin-top: 10px; }
   .err { color: #a32020; font-size: 13px; margin-top: 8px; }
 </style>
@@ -108,7 +110,7 @@ let sid = null;
 try { sid = localStorage.getItem("pierside_sid"); } catch (e) {}
 if (!sid) { sid = crypto.randomUUID(); try { localStorage.setItem("pierside_sid", sid); } catch (e) {} }
 const $ = (id) => document.getElementById(id);
-let cfg = {}, state = {}, photo = "", busy = false, buttonsShown = false;
+let cfg = {}, state = {}, photo = "", busy = false, buttonsShown = false, polls = 0, pollTimer = null;
 const usd = (n) => "$" + Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
@@ -153,9 +155,18 @@ function render() {
   if (b) {
     const c = el("div", "booked");
     c.append(el("b", null, `Booked · ${b.id}`), el("div", null, `${b.slot}. Deposit ${usd(b.deposit)} captured by PayPal (${b.capture_id}).`));
-    if (b.invoice_id) c.append(el("div", null, `Balance invoice drafted in PayPal: ${b.invoice_id}`));
-    $("pay").replaceChildren(c); buttonsShown = false;
+    const bal = b.balance_invoice;
+    if (bal) { const a = el("a", null, `Dive complete. Pay the ${usd(state.quote.balance)} balance with PayPal`); a.href = bal.url; a.target = "_blank"; c.append(a); }
+    else if (b.invoice_id) c.append(el("div", null, `Balance invoice drafted in PayPal: ${b.invoice_id}`));
+    const plan = el("div", "plan"); plan.append(el("h4", null, "Pre-dive plan"), document.createTextNode(b.plan || "Writing it now (Render Workflow)…"));
+    $("pay").replaceChildren(c, plan); buttonsShown = false;
+    if (!bal && polls < 200 && !pollTimer) pollTimer = setTimeout(poll, 3000);  // the plan and the invoice arrive after the payment
   } else if (q && s) showPay(); else { $("pay").replaceChildren(); buttonsShown = false; }
+}
+
+function poll() {
+  pollTimer = null; polls++;
+  api("/api/session?session_id=" + encodeURIComponent(sid)).then((r) => { state = r.state; render(); }).catch(() => {});
 }
 
 function showPay() {

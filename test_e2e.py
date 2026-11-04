@@ -1,6 +1,9 @@
 """End-to-end over HTTP with MOCK=1: chat -> quote -> slot hold -> PayPal order -> capture -> booked,
-the same booking driven by a PayPal webhook instead (closed tab), and bookings surviving a restart.
-Run: .venv/bin/python test_e2e.py"""
+the same booking driven by a PayPal webhook instead (closed tab), bookings surviving a restart, and the
+operator's dive-complete call sending the balance invoice.
+Run: .venv/bin/python test_e2e.py   (jobs.py tasks run in-process)
+Against the real Workflows runtime: `render workflows dev --env-file <file with MOCK=1> -- .venv/bin/python jobs.py`,
+then WORKFLOW_SLUG=pierside-jobs RENDER_USE_LOCAL_DEV=1 .venv/bin/python test_e2e.py"""
 import json, os, subprocess, sys, tempfile, time, urllib.request, uuid
 
 PORT = 8765
@@ -9,7 +12,7 @@ DB_PATH = os.path.join(tempfile.mkdtemp(), "test.db")
 
 def start():
     p = subprocess.Popen([sys.executable, "-m", "uvicorn", "app:app", "--port", str(PORT)],
-                         env={**os.environ, "MOCK": "1", "DB_PATH": DB_PATH}, cwd=os.path.dirname(os.path.abspath(__file__)),
+                         env={**os.environ, "MOCK": "1", "DB_PATH": DB_PATH, "OPS_TOKEN": "test-ops"}, cwd=os.path.dirname(os.path.abspath(__file__)),
                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     for _ in range(50):
         try:
@@ -30,6 +33,17 @@ def get(path):
     return json.loads(urllib.request.urlopen(f"http://127.0.0.1:{PORT}{path}").read())
 
 
+def booked(sid):
+    """The plan and the invoice draft come from the after_payment workflow, a moment after the booking."""
+    deadline = time.time() + 90
+    while time.time() < deadline:
+        s = get("/api/session?session_id=" + sid)
+        if s["state"]["booking"].get("plan"):
+            return s
+        time.sleep(0.2)
+    raise AssertionError(f"no pre-dive plan: {s}")
+
+
 def scope_and_hold(sid):
     post("/api/chat", {"session_id": sid, "message": "12 pilings in Quincy, 25 ft"})
     return post("/api/chat", {"session_id": sid, "message": "first open weekday please"})
@@ -38,9 +52,9 @@ def scope_and_hold(sid):
 srv, cfg = start()
 
 
-def post(path, body):
+def post(path, body, **headers):
     req = urllib.request.Request(f"http://127.0.0.1:{PORT}{path}", json.dumps(body).encode(),
-                                 {"Content-Type": "application/json"})
+                                 {"Content-Type": "application/json", **headers})
     with urllib.request.urlopen(req) as r:
         return json.loads(r.read())
 
@@ -60,8 +74,9 @@ try:
     order_id = post("/api/order", {"session_id": sid})["id"]
     r = post("/api/capture", {"session_id": sid, "order_id": order_id})
     b = r["state"]["booking"]
-    assert b and b["deposit"] == f"{q['deposit']:.2f}" and b["invoice_id"].startswith("INV2-"), r
-    assert "Pre-dive plan" in r["reply"], r
+    assert b and b["deposit"] == f"{q['deposit']:.2f}" and b["id"] in r["reply"], r
+    b = booked(sid)["state"]["booking"]
+    assert "Pre-dive plan" in b["plan"] and b["invoice_id"].startswith("INV2-"), b
 
     # the held slot is now gone for everyone else; a forged order id is rejected
     other = uuid.uuid4().hex
@@ -81,8 +96,8 @@ try:
     event = {"id": "WH-" + uuid.uuid4().hex, "event_type": "CHECKOUT.ORDER.APPROVED", "resource": {"id": tab_order}}
     assert post("/api/paypal/webhook", event)["result"].startswith("booked PS-")
     assert post("/api/paypal/webhook", event)["result"] == "duplicate"  # PayPal redelivers; nothing happens twice
-    s = get("/api/session?session_id=" + tab)
-    assert s["state"]["booking"]["order_id"] == tab_order and "Pre-dive plan" in s["history"][-1]["text"], s
+    s = booked(tab)
+    assert s["state"]["booking"]["order_id"] == tab_order and s["state"]["booking"]["id"] in s["history"][-1]["text"], s
     # the page comes back late and calls capture anyway: same booking, no second charge
     late = post("/api/capture", {"session_id": tab, "order_id": tab_order})
     assert late["state"]["booking"]["id"] == s["state"]["booking"]["id"], late
@@ -98,10 +113,27 @@ try:
     r3 = scope_and_hold(third)
     assert r3["state"]["slot"]["slot_id"] not in (r["state"]["slot"]["slot_id"], late["state"]["slot"]["slot_id"]), r3
 
+    # the operator marks the first dive complete: the balance invoice goes out (a workflow task), once
+    for headers in ({}, {"Authorization": "Bearer wrong"}):
+        try:
+            post("/api/ops/complete", {"booking_id": b["id"]}, **headers)
+            raise AssertionError("ops call without the operator token must fail")
+        except urllib.error.HTTPError as e:
+            assert e.code == 401
+    ops = {"Authorization": "Bearer test-ops"}
+    done = post("/api/ops/complete", {"booking_id": b["id"]}, **ops)["booking"]
+    assert done["dive"] == "complete" and done["balance_invoice"]["status"] == "SENT" and done["balance_invoice"]["url"], done
+    assert get("/api/session?session_id=" + sid)["state"]["booking"]["balance_invoice"] == done["balance_invoice"]
+    try:
+        post("/api/ops/complete", {"booking_id": "PS-NOPE"}, **ops)
+        raise AssertionError("unknown booking must 404")
+    except urllib.error.HTTPError as e:
+        assert e.code == 404
+
     # a refund releases the slot
     refund = {"id": "WH-" + uuid.uuid4().hex, "event_type": "PAYMENT.CAPTURE.REFUNDED",
               "resource": {"supplementary_data": {"related_ids": {"order_id": tab_order}}}}
     assert post("/api/paypal/webhook", refund)["result"] == "refunded, slot released"
-    print("e2e ok:", b["id"], b["slot"], "deposit", b["deposit"], "of", q["total"], "| webhook booking + restart + refund ok")
+    print("e2e ok:", b["id"], b["slot"], "deposit", b["deposit"], "of", q["total"], "| webhook booking + restart + refund + balance invoice ok")
 finally:
     stop(srv)
