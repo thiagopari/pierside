@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pierside · AI-powered underwater inspection booking</title>
+<style>
+  :root {
+    --ink: #0d2236; --fg: #1a2a3a; --muted: #5c7080; --light: #8a9bb0;
+    --bg: #ffffff; --bg-alt: #f5f8fa; --line: #dde4ea;
+    --sea: #0f5c7a; --sea-dark: #0a3f55; --sea-light: #e3f0f5; --sea-glow: #c5e4f0;
+    --ok: #1f7a4a; --ok-bg: #e5f4ec; --warn: #9a5b00;
+    --hero-bg: #071a2b;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--fg); background: var(--bg); }
+  a { color: var(--sea); text-decoration: none; }
+  img { max-width: 100%; display: block; }
+
+  /* NAV */
+  nav { position: fixed; top: 0; left: 0; right: 0; z-index: 100; padding: 14px 24px; display: flex; align-items: center; gap: 16px; background: rgba(7,26,43,.92); backdrop-filter: blur(8px); }
+  nav .logo { font-size: 20px; font-weight: 700; color: #fff; letter-spacing: .3px; }
+  nav .logo span { color: var(--sea-glow); }
+  nav .links { margin-left: auto; display: flex; gap: 24px; align-items: center; }
+  nav .links a { color: #b8c8d6; font-size: 14px; font-weight: 500; }
+  nav .links a:hover { color: #fff; }
+  .nav-btn { padding: 8px 18px; border-radius: 8px; background: var(--sea); color: #fff !important; font-size: 14px; font-weight: 600; border: 0; cursor: pointer; transition: background .15s; }
+  .nav-btn:hover { background: var(--sea-dark); }
+
+  /* HERO */
+  .hero { padding: 120px 24px 80px; background: var(--hero-bg); color: #fff; text-align: center; }
+  .hero h1 { font-size: clamp(2rem, 5vw, 3.2rem); font-weight: 800; line-height: 1.15; max-width: 780px; margin: 0 auto 16px; }
+  .hero h1 span { color: var(--sea-glow); }
+  .hero p { font-size: 1.1rem; color: #9bb0c4; max-width: 600px; margin: 0 auto 36px; line-height: 1.6; }
+  .hero-ctas { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+  .btn-primary { display: inline-flex; align-items: center; gap: 8px; padding: 14px 28px; border-radius: 10px; background: var(--sea); color: #fff; font: 600 16px/1 inherit; border: 0; cursor: pointer; transition: all .15s; }
+  .btn-primary:hover { background: #12789e; transform: translateY(-1px); }
+  .btn-outline { display: inline-flex; align-items: center; gap: 8px; padding: 14px 28px; border-radius: 10px; background: transparent; color: #c5e4f0; font: 600 16px/1 inherit; border: 2px solid #2a5570; cursor: pointer; transition: all .15s; }
+  .btn-outline:hover { border-color: var(--sea-glow); color: #fff; }
+  .hero-badge { display: inline-block; margin-bottom: 20px; padding: 6px 14px; border-radius: 99px; background: rgba(15,92,122,.3); border: 1px solid rgba(77,184,213,.3); color: var(--sea-glow); font-size: 13px; font-weight: 600; letter-spacing: .03em; }
+
+  /* SECTIONS */
+  section { padding: 80px 24px; }
+  .container { max-width: 1080px; margin: 0 auto; }
+  .section-label { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--sea); margin-bottom: 8px; }
+  .section-title { font-size: clamp(1.5rem, 3.5vw, 2.2rem); font-weight: 700; margin-bottom: 12px; line-height: 1.2; }
+  .section-sub { font-size: 1.05rem; color: var(--muted); max-width: 600px; margin-bottom: 48px; line-height: 1.6; }
+
+  /* HOW IT WORKS — FLOW */
+  .flow { background: var(--bg-alt); }
+  .flow-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 24px; }
+  .flow-step { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 28px 24px; position: relative; }
+  .flow-num { width: 36px; height: 36px; border-radius: 50%; background: var(--sea); color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 15px; margin-bottom: 14px; }
+  .flow-step h3 { font-size: 1rem; font-weight: 700; margin-bottom: 6px; }
+  .flow-step p { font-size: 14px; color: var(--muted); line-height: 1.5; }
+  .flow-arrow { display: none; }
+  @media (min-width: 900px) {
+    .flow-arrow { display: flex; align-items: center; justify-content: center; color: var(--sea-glow); font-size: 24px; }
+    .flow-grid { grid-template-columns: 1fr auto 1fr auto 1fr auto 1fr auto 1fr; }
+  }
+
+  /* FEATURES */
+  .features-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 28px; }
+  .feature-card { padding: 28px; border-radius: 14px; border: 1px solid var(--line); background: var(--bg-alt); }
+  .feature-icon { width: 44px; height: 44px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 22px; margin-bottom: 14px; }
+  .feature-card h3 { font-size: 1rem; font-weight: 700; margin-bottom: 6px; }
+  .feature-card p { font-size: 14px; color: var(--muted); line-height: 1.55; }
+  .feat-ai .feature-icon { background: #e8f4fd; color: #0f5c7a; }
+  .feat-pay .feature-icon { background: #fdf6ec; color: #9a5b00; }
+  .feat-weather .feature-icon { background: #e5f4ec; color: #1f7a4a; }
+  .feat-safe .feature-icon { background: #fde8e8; color: #a32020; }
+  .feat-ops .feature-icon { background: #f0e8fd; color: #5c3d8f; }
+  .feat-elastic .feature-icon { background: #e8f4fd; color: #0f5c7a; }
+
+  /* DEMO PREVIEW */
+  .demo-section { background: var(--hero-bg); color: #fff; text-align: center; }
+  .demo-section .section-label { color: var(--sea-glow); }
+  .demo-section .section-sub { color: #8a9bb0; }
+  .demo-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 24px; max-width: 760px; margin: 0 auto; }
+  .demo-card { background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1); border-radius: 16px; padding: 36px 28px; text-align: left; transition: all .2s; }
+  .demo-card:hover { background: rgba(255,255,255,.1); transform: translateY(-3px); }
+  .demo-card h3 { font-size: 1.15rem; margin-bottom: 8px; }
+  .demo-card p { font-size: 14px; color: #8a9bb0; line-height: 1.55; margin-bottom: 20px; }
+  .demo-card .tag { display: inline-block; padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 600; margin-bottom: 14px; }
+  .demo-card.client .tag { background: rgba(15,92,122,.25); color: var(--sea-glow); }
+  .demo-card.operator .tag { background: rgba(92,61,143,.25); color: #c4a8f0; }
+  .demo-btn { display: inline-flex; align-items: center; gap: 8px; padding: 12px 24px; border-radius: 10px; font: 600 15px/1 inherit; border: 0; cursor: pointer; transition: all .15s; width: 100%; justify-content: center; }
+  .demo-btn.client-btn { background: var(--sea); color: #fff; }
+  .demo-btn.client-btn:hover { background: #12789e; }
+  .demo-btn.ops-btn { background: rgba(255,255,255,.12); color: #c5e4f0; border: 1px solid rgba(255,255,255,.15); }
+  .demo-btn.ops-btn:hover { background: rgba(255,255,255,.2); }
+
+  /* TRUST BAR */
+  .trust { text-align: center; background: var(--bg-alt); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .trust-items { display: flex; justify-content: center; gap: 40px; flex-wrap: wrap; }
+  .trust-item { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); font-weight: 500; }
+  .trust-item .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .dot-green { background: var(--ok); }
+  .dot-blue { background: var(--sea); }
+  .dot-amber { background: var(--warn); }
+
+  /* FOOTER */
+  footer { padding: 40px 24px; background: var(--hero-bg); color: #6b8095; text-align: center; font-size: 13px; }
+  footer a { color: #8a9bb0; }
+
+  /* MOBILE */
+  @media (max-width: 700px) {
+    nav { padding: 12px 16px; }
+    nav .links a:not(.nav-btn) { display: none; }
+    section { padding: 56px 16px; }
+    .hero { padding: 100px 16px 56px; }
+    .demo-cards { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="logo">Pier<span>side</span></div>
+  <div class="links">
+    <a href="#how-it-works">How it works</a>
+    <a href="#features">Features</a>
+    <a href="#demo" class="nav-btn">Try the demo</a>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="container">
+    <div class="hero-badge">AI-powered booking for underwater inspections</div>
+    <h1>From first message to <span>booked dive</span> in two minutes</h1>
+    <p>Pierre, your AI booking assistant, scopes the job, prices it from a fixed rate card, checks marine conditions, and takes a PayPal deposit. No phone tag. No email chains.</p>
+    <div class="hero-ctas">
+      <a href="#demo" class="btn-primary">Try the demo &darr;</a>
+      <a href="#how-it-works" class="btn-outline">See how it works</a>
+    </div>
+  </div>
+</section>
+
+<!-- TRUST BAR -->
+<section class="trust" style="padding: 28px 24px;">
+  <div class="trust-items">
+    <div class="trust-item"><span class="dot dot-green"></span> Verified PayPal payments</div>
+    <div class="trust-item"><span class="dot dot-blue"></span> AI scoping, deterministic pricing</div>
+    <div class="trust-item"><span class="dot dot-amber"></span> NOAA marine weather checks</div>
+  </div>
+</section>
+
+<!-- HOW IT WORKS -->
+<section class="flow" id="how-it-works">
+  <div class="container">
+    <div class="section-label">How it works</div>
+    <div class="section-title">Five steps, one conversation</div>
+    <p class="section-sub">Pierre handles the conversation. Money moves only through verified code. No one can discount a job, invent a price, or book an unpaid slot.</p>
+    <div class="flow-grid">
+      <div class="flow-step">
+        <div class="flow-num">1</div>
+        <h3>Describe the site</h3>
+        <p>Tell Pierre what you need inspected — pilings, seawall, hull, or moorings. Send a photo if you have one; Pierre reads it for growth and clarity.</p>
+      </div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-step">
+        <div class="flow-num">2</div>
+        <h3>Get a firm quote</h3>
+        <p>Pierre asks only the missing questions, then calls the rate card. Every line item, the total, and the 30% deposit appear on your job sheet.</p>
+      </div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-step">
+        <div class="flow-num">3</div>
+        <h3>Pick a dive slot</h3>
+        <p>Open slots with marine weather forecasts. Pierre recommends calm days and warns about rough conditions so dives don't get cancelled.</p>
+      </div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-step">
+        <div class="flow-num">4</div>
+        <h3>Pay the deposit</h3>
+        <p>30% deposit through PayPal. The server captures, verifies to the cent, and books the slot. The 70% balance is invoiced after the dive.</p>
+      </div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-step">
+        <div class="flow-num">5</div>
+        <h3>Booked + pre-dive plan</h3>
+        <p>Booking confirmed, cancellation policy shown, and Pierre writes a pre-dive plan: access, tide window, dive sequence, safety, deliverables.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FEATURES -->
+<section id="features">
+  <div class="container">
+    <div class="section-label">Features</div>
+    <div class="section-title">Built for real operations</div>
+    <p class="section-sub">Everything a dive contractor needs to go from inquiry to invoice, without the back-and-forth.</p>
+    <div class="features-grid">
+      <div class="feature-card feat-ai">
+        <div class="feature-icon">🤖</div>
+        <h3>AI scoping with Pierre</h3>
+        <p>Multi-turn conversation powered by Claude. Pierre asks follow-up questions, reads site photos for marine growth and water clarity, and never guesses a price.</p>
+      </div>
+      <div class="feature-card feat-pay">
+        <div class="feature-icon">💳</div>
+        <h3>PayPal payments</h3>
+        <p>Orders v2 for the deposit, Invoicing v2 for the balance. Verified webhooks handle closed tabs and refunds. The slot books only after the money lands.</p>
+      </div>
+      <div class="feature-card feat-weather">
+        <div class="feature-icon">🌊</div>
+        <h3>Marine weather forecasts</h3>
+        <p>NOAA forecast on every slot. Pierre recommends calm days and warns about wind and waves, reducing last-minute cancellations and wasted crew trips.</p>
+      </div>
+      <div class="feature-card feat-safe">
+        <div class="feature-icon">🔒</div>
+        <h3>Tamper-proof pricing</h3>
+        <p>The AI talks; a deterministic rate card prices. A prompt-injected or confused model cannot discount a job, change a price, or book without payment.</p>
+      </div>
+      <div class="feature-card feat-ops">
+        <div class="feature-icon">📋</div>
+        <h3>Operator dashboard</h3>
+        <p>Every booking in a sortable, filterable grid. Mark dives complete, record findings and hours, and PayPal emails the balance invoice to the customer.</p>
+      </div>
+      <div class="feature-card feat-elastic">
+        <div class="feature-icon">🔍</div>
+        <h3>Job history search</h3>
+        <p>Elasticsearch hybrid search finds similar past inspections. Shows the customer what the crew found last time and helps operators estimate real dive hours.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FOR WHOM -->
+<section style="background: var(--bg-alt);">
+  <div class="container" style="text-align: center;">
+    <div class="section-label">Two sides, one system</div>
+    <div class="section-title" style="max-width: 600px; margin: 0 auto 12px;">Client books. Operator delivers.</div>
+    <p class="section-sub" style="margin: 0 auto 48px; max-width: 560px;">The client chats with Pierre to scope, quote, and pay. The operator manages bookings, completes dives, and sends invoices. Both work from the same data.</p>
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; max-width: 700px; margin: 0 auto; text-align: left;">
+      <div style="padding: 28px; background: #fff; border: 1px solid var(--line); border-radius: 14px;">
+        <div style="font-size: 14px; font-weight: 700; color: var(--sea); margin-bottom: 10px;">CLIENT SIDE</div>
+        <ul style="list-style: none; padding: 0; font-size: 14px; color: var(--muted); display: flex; flex-direction: column; gap: 8px;">
+          <li>✓ Chat with Pierre to scope the job</li>
+          <li>✓ Get a firm, line-item quote</li>
+          <li>✓ See weather forecasts on dive slots</li>
+          <li>✓ Pay 30% deposit through PayPal</li>
+          <li>✓ Receive pre-dive plan and booking</li>
+          <li>✓ Cancel up to 2 days before for a refund</li>
+        </ul>
+      </div>
+      <div style="padding: 28px; background: #fff; border: 1px solid var(--line); border-radius: 14px;">
+        <div style="font-size: 14px; font-weight: 700; color: #5c3d8f; margin-bottom: 10px;">OPERATOR SIDE</div>
+        <ul style="list-style: none; padding: 0; font-size: 14px; color: var(--muted); display: flex; flex-direction: column; gap: 8px;">
+          <li>✓ View all bookings in a live grid</li>
+          <li>✓ See estimated dive sessions per job</li>
+          <li>✓ Track cancellation deadlines</li>
+          <li>✓ Mark dives complete with findings</li>
+          <li>✓ PayPal emails the balance invoice</li>
+          <li>✓ Job history feeds the Kibana dashboard</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- DEMO -->
+<section class="demo-section" id="demo">
+  <div class="container">
+    <div class="section-label">Try it</div>
+    <div class="section-title" style="color: #fff;">Choose your role</div>
+    <p class="section-sub" style="margin: 0 auto 40px;">Both demos run with mock AI and sandbox PayPal. No real money, no API keys needed.</p>
+    <div class="demo-cards">
+      <div class="demo-card client">
+        <div class="tag">CLIENT</div>
+        <h3>Book an inspection</h3>
+        <p>Chat with Pierre. Describe your site, get a quote, pick a weather-checked slot, and pay the deposit. See the full booking flow from the customer's side.</p>
+        <a href="/chat" class="demo-btn client-btn">Start as client →</a>
+      </div>
+      <div class="demo-card operator">
+        <div class="tag">OPERATOR</div>
+        <h3>Manage bookings</h3>
+        <p>View every booking in the AG Grid dashboard. Mark dives complete, record hours and findings, and send the balance invoice through PayPal.</p>
+        <a href="/ops" class="demo-btn ops-btn">Open operator dashboard →</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p style="margin-bottom: 6px;"><strong style="color: #b8c8d6;">Pierside</strong> &middot; Demo company, sandbox payments, illustrative rate card</p>
+    <p>Built with Claude, PayPal, Elasticsearch &middot; <a href="https://github.com/thiagopari/pierside">GitHub</a> &middot; MIT License</p>
+  </div>
+</footer>
+
+<script>
+document.querySelectorAll('a[href^="#"]').forEach(a => {
+  a.addEventListener("click", e => {
+    const t = document.querySelector(a.getAttribute("href"));
+    if (t) { e.preventDefault(); t.scrollIntoView({behavior: "smooth"}); }
+  });
+});
+</script>
+</body>
+</html>

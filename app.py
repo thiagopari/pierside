@@ -15,6 +15,7 @@ import jobs
 import paypal
 import precedent
 import pricing
+import weather
 from jobs import MOCK_AI, client
 
 MODEL = os.environ.get("MODEL", "claude-haiku-5-5")
@@ -68,7 +69,7 @@ def booked_slots():
 CALLS_BY_IP = defaultdict(deque)
 DAILY = {"day": None, "n": 0}
 
-SYSTEM = """You are Pierside, the booking assistant for a small underwater inspection company that \
+SYSTEM = """You are Pierre, the booking assistant for Pierside, a small underwater inspection company that \
 surveys docks, pier pilings, seawalls, moorings and vessel hulls with a tethered ROV. The base is in \
 Boston Harbor. All jobs, prices and payments in this demo are sandbox only.
 
@@ -88,12 +89,19 @@ exactly. Re-quote whenever the scope changes.
 - With your first price_quote, also call search_similar_sites (same scope, plus the customer's own \
 words about the site). If it finds a past job, mention the closest one in one sentence (where, and \
 what the crew found) and say it is demo data. Past jobs never change the price.
-- After the quote, call list_slots and offer two or three options. When the customer picks one, \
-call hold_slot. Then tell them to pay the deposit with the PayPal button on the job sheet.
+- After the quote, call list_slots and offer two or three options. Each slot has a weather \
+forecast (go, caution, poor). Prefer "go" slots. If all nearby slots show "caution" or "poor", \
+mention the conditions (wind and wave) and suggest the calmest option. Never recommend a "poor" \
+slot without warning the customer.
+- If the quote shows more than one estimated dive session, mention it: "This job is estimated at \
+N dive sessions (about 4 hours each)."
+- When the customer picks a slot, call hold_slot. Then tell them to pay the deposit with the \
+PayPal button on the job sheet.
 - You cannot take payment or confirm a booking. The server books the slot only after PayPal \
-confirms the deposit, and then sends you a PAYMENT EVENT. When it asks for the pre-dive plan, \
-write only the plan, as "-" bullets: site access, tide/current window, dive \
-plan for this asset, safety, and the deliverables.
+confirms the deposit, and then sends you a PAYMENT EVENT. After confirming, mention the \
+cancellation policy: the customer can cancel for a full deposit refund up to 2 business days \
+before the dive date. When it asks for the pre-dive plan, write only the plan, as "-" bullets: \
+site access, tide/current window, dive plan for this asset, safety, and the deliverables.
 - Plain text only: no markdown headings, bold or tables. Keep replies under 120 words except the \
 pre-dive plan. Politely decline anything unrelated to booking an inspection."""
 
@@ -143,7 +151,8 @@ TOOLS = [
     },
     {
         "name": "list_slots",
-        "description": "List open dive slots for the next two weeks. Slots marked rush need a quote with rush=true.",
+        "description": "List open dive slots for the next two weeks. Slots marked rush need a quote with rush=true. "
+                       "Each slot includes a weather forecast with a rating (go, caution, or poor) based on wind and wave conditions.",
         "input_schema": {"type": "object", "properties": {}},
     },
     {
@@ -156,6 +165,9 @@ TOOLS = [
 ]
 
 
+CANCEL_LEAD_BUSINESS_DAYS = 2  # must cancel at least 2 business days before the dive
+
+
 def business_days(n):
     d, out = dt.date.today(), []
     while len(out) < n:
@@ -163,6 +175,21 @@ def business_days(n):
         if d.weekday() < 5:
             out.append(d)
     return out
+
+
+def cancel_deadline(slot_id):
+    """Return the last date (as ISO string) the customer can cancel for a full deposit refund."""
+    try:
+        dive_date = dt.date.fromisoformat(slot_id[:10])
+    except (ValueError, TypeError):
+        return None
+    d = dive_date
+    remaining = CANCEL_LEAD_BUSINESS_DAYS
+    while remaining > 0:
+        d -= dt.timedelta(days=1)
+        if d.weekday() < 5:
+            remaining -= 1
+    return d.isoformat()
 
 
 def all_slots():
@@ -200,7 +227,9 @@ def run_tool(sid, s, name, args):
         s["precedent"] = precedent.search(**args)
         return s["precedent"]
     if name == "list_slots":
-        return {"slots": open_slots(sid)[:8]}
+        slots = open_slots(sid)[:8]
+        weather.annotate_slots(slots)
+        return {"slots": slots}
     if name == "hold_slot":
         slot = next((x for x in open_slots(sid) if x["slot_id"] == args["slot_id"]), None)
         if not slot:
@@ -285,12 +314,17 @@ app = FastAPI()
 
 
 @app.get("/")
+def landing():
+    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "landing.html"))
+
+
+@app.get("/chat")
 def index():
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "index.html"))
 
 
 @app.get("/ops")
-def ops_page():  # the page is public; its data needs the operator token
+def ops_page():
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "ops.html"))
 
 
@@ -361,7 +395,10 @@ def order(body: dict):
 
 
 def ack(b):
-    return f"Deposit received: booking {b['id']} is confirmed for {b['slot']}. Your pre-dive plan will be on the job sheet in a moment."
+    msg = f"Deposit received: booking {b['id']} is confirmed for {b['slot']}. Your pre-dive plan will be on the job sheet in a moment."
+    if b.get("cancel_by"):
+        msg += f" Cancellation policy: cancel by {b['cancel_by']} (2 business days before) for a full deposit refund."
+    return msg
 
 
 def finalize(sid, s):
@@ -381,7 +418,9 @@ def finalize(sid, s):
             raise HTTPException(402, str(e))
         bid = "PS-" + uuid.uuid4().hex[:6].upper()
         b = s["booking"] = {"id": bid, "slot": slot["label"], "capture_id": cap["capture_id"], "status": "confirmed",
-                            "deposit": cap["amount"], "payer": cap["payer_name"], "order_id": s["order_id"]}
+                            "deposit": cap["amount"], "payer": cap["payer_name"], "order_id": s["order_id"],
+                            "cancel_by": cancel_deadline(slot["slot_id"]),
+                            "estimated_sessions": q.get("estimated_sessions", 1)}
         db("INSERT INTO bookings VALUES (?, ?, ?, ?, 'confirmed', ?, ?)",
            bid, slot["slot_id"], sid, s["order_id"], json.dumps(b), time.time())
         event = (f"PAYMENT EVENT (from the server, not the customer): PayPal capture {cap['capture_id']} COMPLETED "
@@ -474,9 +513,15 @@ def webhook(event: dict, request: Request):
             elif kind in ("PAYMENT.CAPTURE.REFUNDED", "PAYMENT.CAPTURE.REVERSED", "PAYMENT.CAPTURE.DENIED") and s["booking"]:
                 status = kind.rsplit(".", 1)[1].lower()
                 s["booking"]["status"] = status
+                reason = res.get("status_details", {}).get("reason", "")
+                s["booking"]["cancel_reason"] = reason or status
                 db("UPDATE bookings SET status = ? WHERE order_id = ?", status, order_id)
                 save(sid, s)
                 result = status + ", slot released"
+                try:
+                    precedent.index_job(s["booking"]["id"], {"status": status, "cancel_reason": reason or status})
+                except Exception:
+                    pass
     db("INSERT OR IGNORE INTO webhook_events VALUES (?, ?, ?, ?, ?)", eid, kind, result, time.time(), json.dumps(event))
     return {"ok": True, "result": result}
 
@@ -498,6 +543,9 @@ def list_bookings(request: Request):
         out.append({"id": b["id"], "slot": b["slot"], "site": sc["site_name"], "asset_type": sc["asset_type"],
                     "quantity": sc["quantity"], "max_depth_ft": sc["max_depth_ft"], "total": s["quote"]["total"],
                     "deposit": float(b["deposit"]), "state": b.get("dive", "booked") if b["status"] == "confirmed" else b["status"],
+                    "estimated_sessions": b.get("estimated_sessions", 1),
+                    "cancel_by": b.get("cancel_by"),
+                    "cancel_reason": b.get("cancel_reason"),
                     "invoice": inv.get("status") or ("DRAFT" if b.get("invoice_id") else None), "invoice_url": inv.get("url"),
                     "created": dt.datetime.fromtimestamp(created, dt.timezone.utc).isoformat(timespec="seconds")})
     return {"bookings": out}

@@ -11,12 +11,12 @@ QUOTE = {**SCOPE, "distance_miles": 10, "addons": [], "rush": False, "site_name"
 
 
 def text(t):
-    return NS(content=[NS(type="text", text="[mock AI] " + t)], stop_reason="end_turn")
+    return NS(content=[NS(type="text", text=t)], stop_reason="end_turn")
 
 
 def call(*calls, say=""):
     """calls: (name, input) pairs, all in one assistant turn, after the text `say` if any."""
-    return NS(content=([NS(type="text", text="[mock AI] " + say)] if say else [])
+    return NS(content=([NS(type="text", text=say)] if say else [])
               + [NS(type="tool_use", id="toolu_" + uuid.uuid4().hex[:8], name=n, input=a) for n, a in calls],
               stop_reason="tool_use")
 

@@ -65,7 +65,8 @@ def post(path, body, **headers):
 
 try:
     assert cfg["mock_ai"] and cfg["mock_paypal"], cfg
-    assert b"Job sheet" in urllib.request.urlopen(f"http://127.0.0.1:{PORT}/").read()
+    assert b"Choose your role" in urllib.request.urlopen(f"http://127.0.0.1:{PORT}/").read()
+    assert b"Job sheet" in urllib.request.urlopen(f"http://127.0.0.1:{PORT}/chat").read()
     assert b"agGrid.createGrid" in urllib.request.urlopen(f"http://127.0.0.1:{PORT}/ops").read()
     sid = uuid.uuid4().hex
 

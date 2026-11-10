@@ -4,6 +4,7 @@ Illustrative demo numbers, not a real contractor's price list.
 """
 
 DEPOSIT_RATE = 0.30
+MAX_SESSION_HOURS = 4.0  # a single dive session tops out around 4 hours (battery, air, crew fatigue)
 
 ROV_HOURLY = 275.0
 MIN_ROV_HOURS = 2.0
@@ -54,9 +55,12 @@ def quote(s):
         lines.append(("Rush scheduling (+20%)", round(sum(v for _, v in lines) * 0.2, 2)))
     total = round(sum(v for _, v in lines), 2)
     deposit = round(total * DEPOSIT_RATE, 2)
+    import math
+    sessions = math.ceil(hours / MAX_SESSION_HOURS)
     return {
         "lines": [{"label": l, "amount": v} for l, v in lines],
         "rov_hours": hours,
+        "estimated_sessions": sessions,
         "total": total,
         "deposit": deposit,
         "balance": round(total - deposit, 2),
