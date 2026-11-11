@@ -31,6 +31,24 @@ class FakeClaude:
         if results:
             calls = [b for b in messages[-2]["content"] if b["type"] == "tool_use"]
             out = {c["name"]: json.loads(r["content"]) for c, r in zip(calls, results)}
+            if "handle_objection" in out:
+                obj = out["handle_objection"]
+                discounts = obj.get("available_discounts", [])
+                if discounts:
+                    opts = "; ".join(f"{d['label']} (saves ${d['savings']:.2f})" for d in discounts)
+                    return text(f"{obj['rationale']} Here are some options: {opts}. "
+                                "Would you like to apply one, or would you prefer to contact the operator for a larger adjustment?")
+                return text(obj["rationale"])
+            if "apply_discount" in out:
+                d = out["apply_discount"]
+                if "error" in d:
+                    return text(d["error"])
+                return text(f"Done — I've applied the discount. Your new total is ${d['new_total']:.2f}, "
+                            f"with a 30% deposit of ${d['new_deposit']:.2f}.")
+            if "contact_operator" in out:
+                e = out["contact_operator"]
+                return text(f"I've drafted an email to the operator at {e['to']} about your price adjustment request. "
+                            "They'll review your case and follow up directly.")
             if "list_slots" in out:  # listed next to a re-quote = the injected turn, which takes a rush slot
                 slot = next(x for x in out["list_slots"]["slots"] if x["rush"] == ("price_quote" in out))
                 return call(("hold_slot", {"slot_id": slot["slot_id"]}), say=f"{slot['label']} is the first open weekday.")
@@ -50,6 +68,15 @@ class FakeClaude:
                         "- Safety: dive flag up, no props within 50 ft\n- Deliverables: video + report in 3 business days")
         if said.lower().startswith("ignore"):  # the real strict schema has no discount field; pricing.quote ignores unknown keys anyway
             return call(("price_quote", {**QUOTE, "discount_pct": 50}), ("list_slots", {}))
+        lower = said.lower()
+        if any(kw in lower for kw in ("apply", "fleet partner", "batch", "accept")):
+            did = "fleet_partner" if "fleet" in lower else "batch_mobilization"
+            return call(("apply_discount", {"discount_id": did}))
+        if any(kw in lower for kw in ("contact operator", "talk to operator", "speak to someone", "bigger adjustment", "need more off")):
+            return call(("contact_operator", {"client_reasoning": said}))
+        if any(kw in lower for kw in ("discount", "cheaper", "expensive", "waive", "too much", "lower the")):
+            otype = "rush" if "rush" in lower else "mobilization" if any(k in lower for k in ("travel", "mobilization", "miles")) else "discount"
+            return call(("handle_objection", {"objection_type": otype}))
         if not any(b.get("name") == "price_quote" for m in messages for b in m["content"]):
             return call(("price_quote", QUOTE), ("search_similar_sites", {**SCOPE, "site_notes": said}))
         return call(("list_slots", {}))

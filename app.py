@@ -86,6 +86,14 @@ reasonable assumption, say it out loud, and use "unknown" for fouling.
 worth a closer look) and use it to set fouling and visibility.
 - Never state, estimate or change a price yourself. Always call price_quote and repeat its numbers \
 exactly. Re-quote whenever the scope changes.
+- If the customer pushes back on pricing, asks for a discount, or questions any fee, call \
+handle_objection. It returns a rationale and a list of available discounts with exact savings. \
+Present the rationale warmly, then offer the discounts. Three scenarios: \
+(1) Customer is fine with the price or accepts a discount — call apply_discount with the chosen \
+discount_id to adjust the quote. (2) Customer wants a small reduction — present the available \
+discounts and let them pick. (3) Customer wants a larger adjustment than any available discount — \
+call contact_operator with their reasoning to draft an email to the dive operator for approval. \
+Tell the customer their request has been sent and the operator will follow up.
 - With your first price_quote, also call search_similar_sites (same scope, plus the customer's own \
 words about the site). If it finds a past job, mention the closest one in one sentence (where, and \
 what the crew found) and say it is demo data. Past jobs never change the price.
@@ -161,6 +169,59 @@ TOOLS = [
         "strict": True,
         "input_schema": {"type": "object", "additionalProperties": False, "required": ["slot_id"],
                          "properties": {"slot_id": {"type": "string"}}},
+    },
+    {
+        "name": "handle_objection",
+        "description": "Call when the customer pushes back on pricing, asks for a discount, questions a fee "
+                       "(mobilization, rush, add-ons), or requests custom pricing. Returns a rationale, "
+                       "available discount options with exact savings, and escalation guidance.",
+        "strict": True,
+        "input_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["objection_type"],
+            "properties": {
+                "objection_type": {
+                    "type": "string",
+                    "enum": ["mobilization", "rush", "discount", "addons"],
+                    "description": "mobilization: travel/distance fee pushback; rush: rush surcharge pushback; "
+                                   "discount: general price reduction request; addons: add-on cost pushback",
+                },
+            },
+        },
+    },
+    {
+        "name": "apply_discount",
+        "description": "Apply an approved discount from handle_objection to the current quote. Only use a "
+                       "discount_id returned by handle_objection. The quote total will be adjusted.",
+        "strict": True,
+        "input_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["discount_id"],
+            "properties": {
+                "discount_id": {"type": "string", "description": "The discount_id from handle_objection's available_discounts"},
+            },
+        },
+    },
+    {
+        "name": "contact_operator",
+        "description": "Draft an email to the dive operator requesting a custom price adjustment that exceeds "
+                       "the self-serve discount threshold. Use when the customer needs a larger reduction than "
+                       "the available discounts offer. Include the customer's reasoning for the adjustment.",
+        "strict": True,
+        "input_schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["client_reasoning"],
+            "properties": {
+                "client_reasoning": {
+                    "type": "string",
+                    "description": "The customer's explanation for why they need a larger price adjustment, "
+                                   "in their own words or a faithful summary.",
+                },
+            },
+        },
     },
 ]
 
@@ -242,6 +303,25 @@ def run_tool(sid, s, name, args):
         s["slot"] = slot
         return {"held": slot["label"], "deposit_due": s["quote"]["deposit"],
                 "next": "The PayPal deposit button is now on the customer's job sheet."}
+    if name == "handle_objection":
+        return pricing.evaluate_objection(args["objection_type"], s.get("scope"), s.get("quote"))
+    if name == "apply_discount":
+        if not s["quote"]:
+            return {"error": "call price_quote first"}
+        if s["booking"]:
+            return {"error": f"already booked as {s['booking']['id']}: its price is fixed."}
+        result = pricing.apply_discount(args["discount_id"], s.get("scope", {}), s["quote"])
+        if result is None:
+            return {"error": f"discount '{args['discount_id']}' is not applicable — re-quote with adjusted scope instead"}
+        s["quote"] = {**s["quote"], **result, "id": s["quote"]["id"]}
+        return {"applied": args["discount_id"], "new_total": result["total"],
+                "new_deposit": result["deposit"], "new_balance": result["balance"]}
+    if name == "contact_operator":
+        if not s["quote"] or not s.get("scope"):
+            return {"error": "call price_quote first"}
+        email = pricing.draft_operator_email(s["scope"], s["quote"], args["client_reasoning"])
+        s["operator_email"] = email
+        return email
     return {"error": f"unknown tool {name}"}
 
 
