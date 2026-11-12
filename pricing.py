@@ -4,6 +4,7 @@ Illustrative demo numbers, not a real contractor's price list.
 """
 
 DEPOSIT_RATE = 0.30
+MAX_SESSION_HOURS = 4.0  # a single dive session tops out around 4 hours (battery, air, crew fatigue)
 
 ROV_HOURLY = 275.0
 MIN_ROV_HOURS = 2.0
@@ -35,16 +36,22 @@ def depth_factor(max_depth_ft):
     return 1.0
 
 
-def quote(s):
-    """s: scope dict as validated by the price_quote tool schema."""
+def quote(s, mobilization_courtesy=0.0):
+    """s: scope dict as validated by the price_quote tool schema.
+    mobilization_courtesy: share off the mobilization charge, set only by negotiation.py (a keyword argument,
+    never read from the model's tool input, so a prompt-injected price_quote call cannot reach it)."""
     name, unit, setup, per_unit = ASSETS[s["asset_type"]]
     qty = max(float(s["quantity"]), 0)
     hours = (setup + per_unit * qty) * VISIBILITY[s["visibility"]] * FOULING[s["fouling"]]
     hours = max(round(hours * 4) / 4, MIN_ROV_HOURS)  # bill in quarter hours
     rov = hours * ROV_HOURLY * depth_factor(float(s["max_depth_ft"]))
 
+    mob = MOBILIZATION + max(float(s["distance_miles"]) - FREE_MILES, 0) * PER_MILE
+    mob_label = "Mobilization"
+    if mobilization_courtesy:
+        mob, mob_label = mob * (1 - mobilization_courtesy), f"Mobilization (advance-booking courtesy, {mobilization_courtesy:.0%} off)"
     lines = [
-        ("Mobilization", MOBILIZATION + max(float(s["distance_miles"]) - FREE_MILES, 0) * PER_MILE),
+        (mob_label, mob),
         (f"ROV survey: {name}, {qty:g} {unit} ({hours:g} h at max depth {float(s['max_depth_ft']):g} ft)", rov),
         ("Video + inspection report", REPORT),
     ]
@@ -54,9 +61,12 @@ def quote(s):
         lines.append(("Rush scheduling (+20%)", round(sum(v for _, v in lines) * 0.2, 2)))
     total = round(sum(v for _, v in lines), 2)
     deposit = round(total * DEPOSIT_RATE, 2)
+    import math
+    sessions = math.ceil(hours / MAX_SESSION_HOURS)
     return {
         "lines": [{"label": l, "amount": v} for l, v in lines],
         "rov_hours": hours,
+        "estimated_sessions": sessions,
         "total": total,
         "deposit": deposit,
         "balance": round(total - deposit, 2),
@@ -75,4 +85,7 @@ if __name__ == "__main__":
     deep = quote(dict(base, max_depth_ft=70, rush=True, addons=["cp_readings", "cp_readings"]))
     assert abs(deep["total"] - (450 + 4.25 * 275 * 1.3 + 350 + 250) * 1.2) < 0.02, deep
     assert deep["total"] == round(sum(l["amount"] for l in deep["lines"]), 2)
+    c = quote(base, mobilization_courtesy=0.15)
+    assert round(q["total"] - c["total"], 2) == 67.5 and c["lines"][0]["label"].startswith("Mobilization (advance")
+    assert c["deposit"] + c["balance"] == c["total"] and quote({**base, "discount_pct": 50}) == q  # unknown keys change nothing
     print("pricing ok", q["total"], q["deposit"])

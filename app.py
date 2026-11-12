@@ -12,9 +12,11 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 
 import jobs
+import negotiation
 import paypal
 import precedent
 import pricing
+import weather
 from jobs import MOCK_AI, client
 
 MODEL = os.environ.get("MODEL", "claude-haiku-5-5")
@@ -54,7 +56,8 @@ def db(sql, *args):
 def load(sid):
     row = db("SELECT data FROM sessions WHERE id = ?", sid)
     return json.loads(row[0][0]) if row else {"messages": [], "history": [], "quote": None, "scope": None,
-                                              "slot": None, "order_id": None, "booking": None, "turns": 0}
+                                              "slot": None, "order_id": None, "booking": None, "turns": 0,
+                                              "courtesy": None, "offered": [], "applied": 0}
 
 
 def save(sid, s):
@@ -68,7 +71,7 @@ def booked_slots():
 CALLS_BY_IP = defaultdict(deque)
 DAILY = {"day": None, "n": 0}
 
-SYSTEM = """You are Pierside, the booking assistant for a small underwater inspection company that \
+SYSTEM = """You are Pierre, the booking assistant for Pierside, a small underwater inspection company that \
 surveys docks, pier pilings, seawalls, moorings and vessel hulls with a tethered ROV. The base is in \
 Boston Harbor. All jobs, prices and payments in this demo are sandbox only.
 
@@ -85,15 +88,29 @@ reasonable assumption, say it out loud, and use "unknown" for fouling.
 worth a closer look) and use it to set fouling and visibility.
 - Never state, estimate or change a price yourself. Always call price_quote and repeat its numbers \
 exactly. Re-quote whenever the scope changes.
+- If the customer pushes back on the price (too high, asks for a discount, mentions a cheaper quote), \
+stay warm and brief. Call explain_price and get_offers, then say in plain words: what is firm and why \
+(mobilization, the video and report), what moves only if the facts change (growth, clarity, depth: invite \
+photos or what they actually know, never hint at a fact that would be cheaper), and the options get_offers \
+returned, with its exact numbers. Offer only what get_offers lists. When the customer accepts one, call \
+apply_offer with its id and repeat the new total. Never invent urgency or scarcity, never promise a discount \
+or say you will ask someone, and if nothing more is listed, kindly say what the price covers and offer to go on.
 - With your first price_quote, also call search_similar_sites (same scope, plus the customer's own \
 words about the site). If it finds a past job, mention the closest one in one sentence (where, and \
 what the crew found) and say it is demo data. Past jobs never change the price.
-- After the quote, call list_slots and offer two or three options. When the customer picks one, \
-call hold_slot. Then tell them to pay the deposit with the PayPal button on the job sheet.
+- After the quote, call list_slots and offer two or three options. Each slot has a weather \
+forecast (go, caution, poor). Prefer "go" slots. If all nearby slots show "caution" or "poor", \
+mention the conditions (wind and wave) and suggest the calmest option. Never recommend a "poor" \
+slot without warning the customer.
+- If the quote shows more than one estimated dive session, mention it: "This job is estimated at \
+N dive sessions (about 4 hours each)."
+- When the customer picks a slot, call hold_slot. Then tell them to pay the deposit with the \
+PayPal button on the job sheet.
 - You cannot take payment or confirm a booking. The server books the slot only after PayPal \
-confirms the deposit, and then sends you a PAYMENT EVENT. When it asks for the pre-dive plan, \
-write only the plan, as "-" bullets: site access, tide/current window, dive \
-plan for this asset, safety, and the deliverables.
+confirms the deposit, and then sends you a PAYMENT EVENT. After confirming, mention the \
+cancellation policy: the customer can cancel for a full deposit refund up to 2 business days \
+before the dive date. When it asks for the pre-dive plan, write only the plan, as "-" bullets: \
+site access, tide/current window, dive plan for this asset, safety, and the deliverables.
 - Plain text only: no markdown headings, bold or tables. Keep replies under 120 words except the \
 pre-dive plan. Politely decline anything unrelated to booking an inspection."""
 
@@ -143,7 +160,8 @@ TOOLS = [
     },
     {
         "name": "list_slots",
-        "description": "List open dive slots for the next two weeks. Slots marked rush need a quote with rush=true.",
+        "description": "List open dive slots for the next two weeks. Slots marked rush need a quote with rush=true. "
+                       "Each slot includes a weather forecast with a rating (go, caution, or poor) based on wind and wave conditions.",
         "input_schema": {"type": "object", "properties": {}},
     },
     {
@@ -153,7 +171,32 @@ TOOLS = [
         "input_schema": {"type": "object", "additionalProperties": False, "required": ["slot_id"],
                          "properties": {"slot_id": {"type": "string"}}},
     },
+    {
+        "name": "explain_price",
+        "description": "Read-only. What each line of the current quote is for and whether it is firm, depends on facts "
+                       "or is the customer's choice, plus what an unknown marine-growth assumption could change. "
+                       "Use it when the customer questions the price.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_offers",
+        "description": "Read-only. The options open to this customer now to lower the quote (a standard slot instead of "
+                       "rush, dropping an add-on, an advance-booking courtesy), each priced by the rate card. "
+                       "The only source of offers.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "apply_offer",
+        "description": "Apply one option the customer accepted, by the id get_offers returned. The server re-prices "
+                       "the quote; you cannot set an amount.",
+        "strict": True,
+        "input_schema": {"type": "object", "additionalProperties": False, "required": ["offer_id"],
+                         "properties": {"offer_id": {"type": "string"}}},
+    },
 ]
+
+
+CANCEL_LEAD_BUSINESS_DAYS = 2  # must cancel at least 2 business days before the dive
 
 
 def business_days(n):
@@ -163,6 +206,21 @@ def business_days(n):
         if d.weekday() < 5:
             out.append(d)
     return out
+
+
+def cancel_deadline(slot_id):
+    """Return the last date (as ISO string) the customer can cancel for a full deposit refund."""
+    try:
+        dive_date = dt.date.fromisoformat(slot_id[:10])
+    except (ValueError, TypeError):
+        return None
+    d = dive_date
+    remaining = CANCEL_LEAD_BUSINESS_DAYS
+    while remaining > 0:
+        d -= dt.timedelta(days=1)
+        if d.weekday() < 5:
+            remaining -= 1
+    return d.isoformat()
 
 
 def all_slots():
@@ -186,21 +244,67 @@ def open_slots(session_id):
             if not s["_taken_demo"] and slot_free(s["slot_id"], session_id, booked)]
 
 
+def release_slot(sid, s):
+    slot, s["slot"] = s["slot"], None
+    if slot and HOLDS.get(slot["slot_id"], (None,))[0] == sid:
+        del HOLDS[slot["slot_id"]]
+
+
+def set_quote(sid, s, scope, courtesy=None):
+    """The one place a quote is made. A new quote is a new price, so a PayPal order made for the old one is
+    stale, and a courtesy lasts only while the scope and slot it was given for do."""
+    q = pricing.quote(scope, mobilization_courtesy=courtesy["pct"] if courtesy else 0.0)
+    s["scope"], s["quote"] = scope, {**q, "id": "Q-" + uuid.uuid4().hex[:8].upper()}
+    s["courtesy"], s["order_id"], s["offered"] = courtesy, None, []
+    if s["slot"] and not scope["rush"] and s["slot"]["rush"]:
+        release_slot(sid, s)
+        q["note"] = "Held slot released: it needs rush=true."
+    return q
+
+
 def run_tool(sid, s, name, args):
-    if s["booking"] and name in ("price_quote", "hold_slot"):  # a paid job keeps its price and slot
+    if s["booking"] and name in ("price_quote", "hold_slot", "apply_offer"):  # a paid job keeps its price and slot
         return {"error": f"already booked as {s['booking']['id']}: its price and slot are fixed. Another job needs a new chat."}
     if name == "price_quote":
-        q = pricing.quote(args)
-        s["scope"], s["quote"] = args, {**q, "id": "Q-" + uuid.uuid4().hex[:8].upper()}
-        if s["slot"] and not args["rush"] and s["slot"]["rush"]:
-            s["slot"] = None
-            q["note"] = "Held slot released: it needs rush=true."
-        return q
+        return set_quote(sid, s, args)  # a changed scope clears any courtesy: ask get_offers again
+    if name in ("explain_price", "get_offers", "apply_offer") and not s["quote"]:
+        return {"error": "call price_quote first"}
+    if name == "explain_price":
+        return negotiation.explain(s["scope"], s["quote"], s.get("courtesy"))
+    if name == "get_offers":
+        offs = negotiation.offers(s["scope"], s["quote"], s.get("courtesy"), open_slots(sid), dt.date.today(), s.get("applied", 0))
+        s["offered"] = [o["id"] for o in offs]
+        return {"offers": offs, "note": negotiation.NOTE if offs else
+                "No options are open on this quote. Kindly say what the price covers and what is firm, and offer to go on."}
+    if name == "apply_offer":
+        oid = args["offer_id"]
+        if oid not in s.get("offered", []):  # only an id the server listed, and only since the last quote
+            return {"error": "that option was not offered: call get_offers and use one of its ids"}
+        res = negotiation.apply(s["scope"], s.get("courtesy"), oid, dt.date.today())
+        s["offered"] = []
+        if "error" in res:
+            return res
+        q = set_quote(sid, s, res["scope"], res["courtesy"])
+        s["applied"] = s.get("applied", 0) + 1
+        out = {"applied": oid, "quote": q}
+        if s["courtesy"] and s["slot"] and not negotiation.slot_qualifies(s["courtesy"], s["slot"]):
+            release_slot(sid, s)
+            out["note"] = (f"The courtesy needs a slot on or after {s['courtesy']['min_slot_date']}, so the held slot was "
+                           "released. Call list_slots and hold one that qualifies.")
+        return out
     if name == "search_similar_sites":
         s["precedent"] = precedent.search(**args)
         return s["precedent"]
     if name == "list_slots":
-        return {"slots": open_slots(sid)[:8]}
+        slots = open_slots(sid)
+        if s.get("courtesy"):  # slots that keep the courtesy first, then a few earlier ones that would end it
+            for x in slots:
+                x["qualifies_for_courtesy"] = negotiation.slot_qualifies(s["courtesy"], x)
+            slots = [x for x in slots if x["qualifies_for_courtesy"]][:5] + \
+                    [x for x in slots if not x["qualifies_for_courtesy"] and not x["rush"]][:3]
+        slots = slots[:8]
+        weather.annotate_slots(slots)
+        return {"slots": slots}
     if name == "hold_slot":
         slot = next((x for x in open_slots(sid) if x["slot_id"] == args["slot_id"]), None)
         if not slot:
@@ -209,10 +313,17 @@ def run_tool(sid, s, name, args):
             return {"error": "call price_quote first"}
         if slot["rush"] and not s["scope"]["rush"]:
             return {"error": "this slot is within 3 business days: re-run price_quote with rush=true first"}
+        note = None
+        if not negotiation.slot_qualifies(s.get("courtesy"), slot):  # an earlier slot ends the courtesy
+            old = s["courtesy"]
+            set_quote(sid, s, s["scope"])
+            note = (f"The advance-booking courtesy ended: this slot is before {old['min_slot_date']}. "
+                    f"The total is back to ${s['quote']['total']:.2f}.")
         HOLDS[slot["slot_id"]] = (sid, time.time() + 900)
         s["slot"] = slot
-        return {"held": slot["label"], "deposit_due": s["quote"]["deposit"],
-                "next": "The PayPal deposit button is now on the customer's job sheet."}
+        out = {"held": slot["label"], "deposit_due": s["quote"]["deposit"],
+               "next": "The PayPal deposit button is now on the customer's job sheet."}
+        return {**out, "note": note} if note else out
     return {"error": f"unknown tool {name}"}
 
 
@@ -278,19 +389,22 @@ def rate_limit(request):
 
 
 def public_state(s):
-    return {k: s.get(k) for k in ("quote", "scope", "slot", "booking", "precedent")}
+    out = {k: s.get(k) for k in ("quote", "scope", "slot", "booking", "precedent", "courtesy")}
+    out["why"] = negotiation.explain(s["scope"], s["quote"], s.get("courtesy")) if s.get("quote") else None
+    return out
 
 
 app = FastAPI()
 
 
 @app.get("/")
+@app.get("/chat")
 def index():
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "index.html"))
 
 
 @app.get("/ops")
-def ops_page():  # the page is public; its data needs the operator token
+def ops_page():
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "ops.html"))
 
 
@@ -349,6 +463,8 @@ def order(body: dict):
             raise HTTPException(400, "need a quote and a held slot first")
         if not slot_free(slot["slot_id"], sid):
             raise HTTPException(409, "that slot was just taken; ask the agent for another")
+        if not negotiation.slot_qualifies(s.get("courtesy"), slot):  # hold_slot keeps these in step; belt and braces
+            raise HTTPException(409, "this slot is earlier than the advance-booking courtesy allows; ask the agent")
         HOLDS[slot["slot_id"]] = (sid, time.time() + 900)
         desc = f"30% deposit, ROV inspection: {s['scope']['site_name']} on {slot['label']} ({q['id']})"
         try:
@@ -361,7 +477,10 @@ def order(body: dict):
 
 
 def ack(b):
-    return f"Deposit received: booking {b['id']} is confirmed for {b['slot']}. Your pre-dive plan will be on the job sheet in a moment."
+    msg = f"Deposit received: booking {b['id']} is confirmed for {b['slot']}. Your pre-dive plan will be on the job sheet in a moment."
+    if b.get("cancel_by"):
+        msg += f" Cancellation policy: cancel by {b['cancel_by']} (2 business days before) for a full deposit refund."
+    return msg
 
 
 def finalize(sid, s):
@@ -381,7 +500,9 @@ def finalize(sid, s):
             raise HTTPException(402, str(e))
         bid = "PS-" + uuid.uuid4().hex[:6].upper()
         b = s["booking"] = {"id": bid, "slot": slot["label"], "capture_id": cap["capture_id"], "status": "confirmed",
-                            "deposit": cap["amount"], "payer": cap["payer_name"], "order_id": s["order_id"]}
+                            "deposit": cap["amount"], "payer": cap["payer_name"], "order_id": s["order_id"],
+                            "cancel_by": cancel_deadline(slot["slot_id"]),
+                            "estimated_sessions": q.get("estimated_sessions", 1)}
         db("INSERT INTO bookings VALUES (?, ?, ?, ?, 'confirmed', ?, ?)",
            bid, slot["slot_id"], sid, s["order_id"], json.dumps(b), time.time())
         event = (f"PAYMENT EVENT (from the server, not the customer): PayPal capture {cap['capture_id']} COMPLETED "
@@ -474,9 +595,15 @@ def webhook(event: dict, request: Request):
             elif kind in ("PAYMENT.CAPTURE.REFUNDED", "PAYMENT.CAPTURE.REVERSED", "PAYMENT.CAPTURE.DENIED") and s["booking"]:
                 status = kind.rsplit(".", 1)[1].lower()
                 s["booking"]["status"] = status
+                reason = res.get("status_details", {}).get("reason", "")
+                s["booking"]["cancel_reason"] = reason or status
                 db("UPDATE bookings SET status = ? WHERE order_id = ?", status, order_id)
                 save(sid, s)
                 result = status + ", slot released"
+                try:
+                    precedent.index_job(s["booking"]["id"], {"status": status, "cancel_reason": reason or status})
+                except Exception:
+                    pass
     db("INSERT OR IGNORE INTO webhook_events VALUES (?, ?, ?, ?, ?)", eid, kind, result, time.time(), json.dumps(event))
     return {"ok": True, "result": result}
 
@@ -498,6 +625,9 @@ def list_bookings(request: Request):
         out.append({"id": b["id"], "slot": b["slot"], "site": sc["site_name"], "asset_type": sc["asset_type"],
                     "quantity": sc["quantity"], "max_depth_ft": sc["max_depth_ft"], "total": s["quote"]["total"],
                     "deposit": float(b["deposit"]), "state": b.get("dive", "booked") if b["status"] == "confirmed" else b["status"],
+                    "estimated_sessions": b.get("estimated_sessions", 1),
+                    "cancel_by": b.get("cancel_by"),
+                    "cancel_reason": b.get("cancel_reason"),
                     "invoice": inv.get("status") or ("DRAFT" if b.get("invoice_id") else None), "invoice_url": inv.get("url"),
                     "created": dt.datetime.fromtimestamp(created, dt.timezone.utc).isoformat(timespec="seconds")})
     return {"bookings": out}

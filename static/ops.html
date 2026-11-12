@@ -23,9 +23,12 @@
 </style>
 </head>
 <body>
-<header>
-  <h1>Pierside · Operator</h1>
-  <p>Booked dives, their state and the PayPal balance invoices. Select a booked dive to mark it complete.</p>
+<header style="display:flex;align-items:center;gap:16px;">
+  <div style="flex:1;">
+    <h1>Pierside · Operator Dashboard</h1>
+    <p>Booked dives, their state and the PayPal balance invoices. Select a booked dive to mark it complete.</p>
+  </div>
+  <a href="/" style="color:#cfe3f1;font-size:14px;text-decoration:none;border:1px solid #3a5b78;padding:6px 14px;border-radius:8px;">← Back</a>
 </header>
 <main>
   <form id="auth">
@@ -61,7 +64,10 @@ const grid = agGrid.createGrid($("grid"), {
     {field: "max_depth_ft", headerName: "Depth (ft)", minWidth: 95},
     {field: "total", valueFormatter: money},
     {field: "deposit", valueFormatter: money, minWidth: 95},
+    {field: "estimated_sessions", headerName: "Sessions", minWidth: 85, valueFormatter: p => p.value > 1 ? p.value : "1"},
     {field: "state", headerName: "Dive", minWidth: 95},
+    {field: "cancel_by", headerName: "Cancel by", minWidth: 110},
+    {field: "cancel_reason", headerName: "Cancel reason", minWidth: 120},
     {field: "invoice", headerName: "Invoice", headerTooltip: "PayPal balance invoice", minWidth: 90, cellRenderer: p => {
       const url = /^https:\/\//.test(p.data.invoice_url || "") && p.data.invoice_url, el = document.createElement(url ? "a" : "span");
       el.textContent = p.value || "";

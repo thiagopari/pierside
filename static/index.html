@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Pierside · ROV inspection quotes</title>
+<title>Pierside · Chat with Pierre</title>
 <style>
   :root {
     --ink: #0d2236; --muted: #5b6b7b; --line: #dde4ea; --bg: #f3f6f8; --card: #fff;
@@ -60,15 +60,42 @@
   .past small { color: var(--muted); }
   .note { font-size: 12px; color: var(--muted); margin-top: 10px; }
   .err { color: #a32020; font-size: 13px; margin-top: 8px; }
+  .sessions { font-size: 13px; color: var(--sea); margin: 6px 0; font-weight: 600; }
+  .cancel-info { font-size: 13px; color: var(--warn); margin: 8px 0; padding: 8px 10px; background: #fdf6ec; border-radius: 8px; }
+  .weather { font-size: 12px; margin-left: 8px; padding: 1px 6px; border-radius: 6px; font-weight: 600; }
+  .weather.go { background: var(--ok-bg); color: var(--ok); }
+  .weather.caution { background: #fdf6ec; color: var(--warn); }
+  .weather.poor { background: #fde8e8; color: #a32020; }
+  details.why { margin: 10px 0 0; font-size: 13px; border: 1px solid var(--line); border-radius: 8px; }
+  details.why summary { cursor: pointer; padding: 8px 10px; font-weight: 600; color: var(--sea); list-style: none; }
+  details.why summary::before { content: "▸ "; }
+  details.why[open] summary::before { content: "▾ "; }
+  details.why .why-body { padding: 0 10px 10px; }
+  .why-line { margin: 6px 0; }
+  .why-line .tag { font-size: 11px; padding: 1px 5px; border-radius: 4px; margin-left: 6px; }
+  .why-line .tag.fixed { background: #e8edf1; color: #4a5568; }
+  .why-line .tag.depends_on_facts { background: #e3f0f5; color: var(--sea); }
+  .why-line .tag.your_choice { background: var(--ok-bg); color: var(--ok); }
+  .why-line .why-text { display: block; color: var(--muted); margin-top: 2px; }
+  .if-confirmed { margin-top: 8px; padding: 8px; background: #fdf6ec; border-radius: 6px; color: var(--warn); }
+  .intro { padding: 18px 24px; background: var(--ink); color: #b8c8d6; font-size: 13px; line-height: 1.5; border-bottom: 1px solid #1e3a52; text-align: center; }
+  .intro strong { color: #fff; font-size: 15px; }
+  .intro .tags { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 8px; }
+  .intro .itag { padding: 3px 10px; border-radius: 99px; background: #1e3a52; font-size: 12px; color: #8fb8d4; }
 </style>
 </head>
 <body>
+<div class="intro">
+  <strong>Pierside — AI-powered underwater inspection booking</strong><br>
+  Describe your site, get a firm quote, pick a weather-checked dive slot, and pay the 30% deposit with PayPal. All in one conversation.
+  <div class="tags"><span class="itag">Claude AI</span><span class="itag">PayPal Orders + Invoicing</span><span class="itag">Elasticsearch</span><span class="itag">NOAA Weather</span></div>
+</div>
 <header>
   <div>
     <h1>Pierside</h1>
-    <p>Underwater ROV inspections: scoped by AI, priced by a fixed rate card, booked with a PayPal deposit</p>
+    <p>Chat with Pierre, your AI booking assistant</p>
   </div>
-  <span style="margin-left:auto"><button class="btn ghost" id="newJob" title="Start over with a new job">New job</button> <span class="badge" id="mode">sandbox</span></span>
+  <span style="margin-left:auto"><a href="/ops" class="btn ghost" style="text-decoration:none">Operator dashboard</a> <button class="btn ghost" id="newJob" title="Start over with a new job">New job</button> <span class="badge" id="mode">sandbox</span></span>
 </header>
 <div class="steps">
   <span class="step" data-step="0">1 · Describe the site</span>
@@ -80,7 +107,7 @@
 <main>
   <section class="card" id="chat">
     <div id="log">
-      <div class="msg bot">Hi, I'm Pierside. Tell me what you need inspected underwater (a hull, pier pilings, a seawall or moorings), roughly where it is and how deep. A photo of the site helps.</div>
+      <div class="msg bot">Hi, I'm Pierre, your Pierside booking assistant. Tell me what you need inspected underwater — a hull, pier pilings, a seawall, or moorings — roughly where it is and how deep. A photo of the site helps too.</div>
     </div>
     <div class="chips" id="chips">
       <button>12 wooden pilings at our marina in Quincy, about 25 ft deep</button>
@@ -149,9 +176,37 @@ function render() {
       const tr = el("tr", c); tr.append(el("td", null, label), el("td", "amt", usd(v))); t.append(tr);
     });
     const sc = state.scope;
-    $("lines").replaceChildren(t, el("p", "scope",
+    const scopeEl = el("p", "scope",
       `Scope: ${sc.quantity} × ${sc.asset_type}, max ${sc.max_depth_ft} ft, ${sc.visibility} visibility, ${sc.fouling} fouling, ${sc.distance_miles} mi` +
-      (sc.addons.length ? `, + ${sc.addons.join(", ")}` : "") + (sc.rush ? ", rush" : "")));
+      (sc.addons.length ? `, + ${sc.addons.join(", ")}` : "") + (sc.rush ? ", rush" : ""));
+    const children = [t, scopeEl];
+    if (q.estimated_sessions && q.estimated_sessions > 1) {
+      children.push(el("p", "sessions", `Estimated dive sessions: ${q.estimated_sessions} (about 4 hours each)`));
+    }
+    if (state.why) {
+      const d = document.createElement("details"); d.className = "why";
+      const s = el("summary", null, "Why this price"); d.append(s);
+      const body = el("div", "why-body");
+      state.why.lines.forEach((l) => {
+        const row = el("div", "why-line");
+        const head = el("span", null, `${l.label}: ${usd(l.amount)}`);
+        const tag = el("span", "tag " + l.can_change, l.can_change.replace(/_/g, " ")); head.append(tag);
+        row.append(head);
+        if (l.why) row.append(el("span", "why-text", l.why));
+        body.append(row);
+      });
+      if (state.why.deposit_note) body.append(el("p", null, state.why.deposit_note));
+      if (state.why.if_confirmed) {
+        const ic = el("div", "if-confirmed");
+        ic.append(el("b", null, "If marine growth is confirmed: "));
+        state.why.if_confirmed.forEach((f, i) => {
+          ic.append(document.createTextNode(`${f.marine_growth}: ${usd(f.total)} (${f.change >= 0 ? "+" : ""}${usd(f.change)})${i < state.why.if_confirmed.length - 1 ? " · " : ""}`));
+        });
+        body.append(ic);
+      }
+      d.append(body); children.push(d);
+    }
+    $("lines").replaceChildren(...children);
   }
   const p = state.precedent;
   $("similar").replaceChildren();
@@ -169,6 +224,12 @@ function render() {
   if (b) {
     const c = el("div", "booked");
     c.append(el("b", null, `Booked · ${b.id}`), el("div", null, `${b.slot}. Deposit ${usd(b.deposit)} captured by PayPal (${b.capture_id}).`));
+    if (b.estimated_sessions && b.estimated_sessions > 1) {
+      c.append(el("div", null, `Estimated dive sessions: ${b.estimated_sessions}`));
+    }
+    if (b.cancel_by) {
+      c.append(el("div", "cancel-info", `Cancellation policy: cancel by ${b.cancel_by} (2 business days before the dive) for a full deposit refund. Contact the operator to cancel.`));
+    }
     const bal = b.balance_invoice;
     if (bal) { const a = el("a", null, `Dive complete. Pay the ${usd(state.quote.balance)} balance with PayPal`); a.href = bal.url; a.target = "_blank"; c.append(a); }
     else if (b.invoice_id) c.append(el("div", null, `Balance invoice drafted in PayPal: ${b.invoice_id}`));
