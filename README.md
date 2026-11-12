@@ -13,7 +13,7 @@ Booking a dock, piling, seawall or hull inspection today takes days of phone tag
 - **Hosted demo:** https://pierside.onrender.com (Render free tier: the first load after idle takes about a minute)
 - **PayPal sandbox buyer:** `sb-omnq353715140@personal.example.com` / `xN8%EHX2` (fake money, PayPal sandbox only)
 
-Try: "12 wooden pilings at our marina in Quincy, about 25 ft deep", answer the agent's questions, pick a slot, then pay the deposit with the sandbox buyer.
+Try: "12 wooden pilings at our marina in Quincy, about 25 ft deep", answer the agent's questions, pick a slot, then pay the deposit with the sandbox buyer. To see the [negotiation](#negotiation), ask "Can you do 50% off?" after the quote.
 
 ## For judges
 
@@ -42,12 +42,23 @@ Try: "12 wooden pilings at our marina in Quincy, about 25 ft deep", answer the a
 
 The split is the point: **the LLM handles the conversation, and money moves only through deterministic, verified code paths.** A prompt-injected or confused agent cannot discount a job, invent a price, or book an unpaid slot.
 
+### Negotiation
+
+Customers push back on price, so the agent negotiates, under the same rule: it never names a number. Three tools call [`negotiation.py`](negotiation.py), deterministic code like the rate card:
+
+- `explain_price`: what each charge is for and whether it can move (`fixed`, `depends_on_facts`, `your_choice`). The job sheet shows it as **Why this price**.
+- `get_offers`: the only source of offers: a standard slot instead of rush, dropping an add-on, or an advance-booking courtesy (15% off mobilization for a slot at least 5 business days out), each priced by the rate card.
+- `apply_offer`: accepts only an id that `get_offers` just listed. The courtesy applies once per quote, never takes a job below 90% of the rate-card price, and ends if the customer then holds an earlier slot; at most 3 options per chat. Ask for 50% off and the agent says no and explains which charges are firm and why.
+
+The policy numbers are placeholders for the operator to set from real margins.
+
 ## Architecture
 
 ```
 browser (static/index.html)
   ├─ POST /api/chat    → Claude tool loop (app.py) → price_quote / search_similar_sites / list_slots / hold_slot
   │                                                    search_similar_sites → Elasticsearch hybrid search (or local ranking)
+  │                                                    explain_price / get_offers / apply_offer → negotiation.py
   ├─ PayPal JS SDK     → createOrder → POST /api/order   → PayPal Orders v2: create
   │                      onApprove   → POST /api/capture → PayPal Orders v2: capture + verify
   │                                                       → book slot → reply "Deposit received"
@@ -69,7 +80,7 @@ SQLite (Render disk): sessions + chat history, orders, bookings, webhook events
 
 **Payment safety:** the browser and the webhook both go through one capture-and-book function. It is idempotent: it checks the order with PayPal before capturing, sends a `PayPal-Request-Id`, and returns the existing booking if the other path got there first. A database constraint allows one confirmed booking per slot. The page keeps its job id in the browser, so a reload or a reopened tab shows the same job.
 
-About 1,000 lines of Python and two HTML pages. PayPal and Elasticsearch are called over plain REST with the standard library ([`paypal.py`](paypal.py), [`precedent.py`](precedent.py)). Claude is called with the official `anthropic` SDK.
+About 1,850 lines of Python, tests included, and two HTML pages. PayPal and Elasticsearch are called over plain REST with the standard library ([`paypal.py`](paypal.py), [`precedent.py`](precedent.py)). Claude is called with the official `anthropic` SDK.
 
 **Demo guardrails:** Haiku model, low effort, a per-IP hourly limit, a global daily cap on model calls, 25 messages per chat, a capped tool loop, client-side photo downscaling to 1024 px, and a spend limit on the API key.
 
@@ -125,8 +136,9 @@ WORKFLOW_SLUG=pierside-jobs RENDER_USE_LOCAL_DEV=1 .venv/bin/uvicorn app:app
 
 ```bash
 .venv/bin/python pricing.py   # rate card self-check
+.venv/bin/python negotiation.py  # negotiation policy self-check
 .venv/bin/python test_e2e.py  # boots the server with MOCK=1: chat → quote → hold → order → capture → booked,
-                              # plus double-booking, forged-order, webhook (closed tab), duplicate-event,
+                              # plus negotiation (explain, courtesy, made-up offer refused, slot rule), double-booking, forged-order, webhook (closed tab), duplicate-event,
                               # restart-persistence, refund, dive-complete (balance invoice) and bookings-list checks
                               # (add WORKFLOW_SLUG + RENDER_USE_LOCAL_DEV=1 to run it through `render workflows dev`)
 .venv/bin/python precedent.py # demo jobs + local past-job ranking self-check

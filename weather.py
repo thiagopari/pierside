@@ -149,7 +149,7 @@ def annotate_slots(slots):
         if w:
             s["weather"] = {
                 "rating": w["rating"],
-                "wind": f"{w['wind_kt']} kt {w['wind_dir']}",
+                "wind": f"{w['wind_kt']} mph {w['wind_dir']}",
                 "wave_ft": w["wave_ft"],
                 "summary": w["short"],
             }
