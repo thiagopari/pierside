@@ -398,10 +398,6 @@ app = FastAPI()
 
 
 @app.get("/")
-def landing():
-    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "landing.html"))
-
-
 @app.get("/chat")
 def index():
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "index.html"))
