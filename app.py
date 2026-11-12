@@ -12,6 +12,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 
 import jobs
+import negotiation
 import paypal
 import precedent
 import pricing
@@ -55,7 +56,8 @@ def db(sql, *args):
 def load(sid):
     row = db("SELECT data FROM sessions WHERE id = ?", sid)
     return json.loads(row[0][0]) if row else {"messages": [], "history": [], "quote": None, "scope": None,
-                                              "slot": None, "order_id": None, "booking": None, "turns": 0}
+                                              "slot": None, "order_id": None, "booking": None, "turns": 0,
+                                              "courtesy": None, "offered": [], "applied": 0}
 
 
 def save(sid, s):
@@ -86,14 +88,13 @@ reasonable assumption, say it out loud, and use "unknown" for fouling.
 worth a closer look) and use it to set fouling and visibility.
 - Never state, estimate or change a price yourself. Always call price_quote and repeat its numbers \
 exactly. Re-quote whenever the scope changes.
-- If the customer pushes back on pricing, asks for a discount, or questions any fee, call \
-handle_objection. It returns a rationale and a list of available discounts with exact savings. \
-Present the rationale warmly, then offer the discounts. Three scenarios: \
-(1) Customer is fine with the price or accepts a discount — call apply_discount with the chosen \
-discount_id to adjust the quote. (2) Customer wants a small reduction — present the available \
-discounts and let them pick. (3) Customer wants a larger adjustment than any available discount — \
-call contact_operator with their reasoning to draft an email to the dive operator for approval. \
-Tell the customer their request has been sent and the operator will follow up.
+- If the customer pushes back on the price (too high, asks for a discount, mentions a cheaper quote), \
+stay warm and brief. Call explain_price and get_offers, then say in plain words: what is firm and why \
+(mobilization, the video and report), what moves only if the facts change (growth, clarity, depth: invite \
+photos or what they actually know, never hint at a fact that would be cheaper), and the options get_offers \
+returned, with its exact numbers. Offer only what get_offers lists. When the customer accepts one, call \
+apply_offer with its id and repeat the new total. Never invent urgency or scarcity, never promise a discount \
+or say you will ask someone, and if nothing more is listed, kindly say what the price covers and offer to go on.
 - With your first price_quote, also call search_similar_sites (same scope, plus the customer's own \
 words about the site). If it finds a past job, mention the closest one in one sentence (where, and \
 what the crew found) and say it is demo data. Past jobs never change the price.
@@ -171,57 +172,26 @@ TOOLS = [
                          "properties": {"slot_id": {"type": "string"}}},
     },
     {
-        "name": "handle_objection",
-        "description": "Call when the customer pushes back on pricing, asks for a discount, questions a fee "
-                       "(mobilization, rush, add-ons), or requests custom pricing. Returns a rationale, "
-                       "available discount options with exact savings, and escalation guidance.",
-        "strict": True,
-        "input_schema": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["objection_type"],
-            "properties": {
-                "objection_type": {
-                    "type": "string",
-                    "enum": ["mobilization", "rush", "discount", "addons"],
-                    "description": "mobilization: travel/distance fee pushback; rush: rush surcharge pushback; "
-                                   "discount: general price reduction request; addons: add-on cost pushback",
-                },
-            },
-        },
+        "name": "explain_price",
+        "description": "Read-only. What each line of the current quote is for and whether it is firm, depends on facts "
+                       "or is the customer's choice, plus what an unknown marine-growth assumption could change. "
+                       "Use it when the customer questions the price.",
+        "input_schema": {"type": "object", "properties": {}},
     },
     {
-        "name": "apply_discount",
-        "description": "Apply an approved discount from handle_objection to the current quote. Only use a "
-                       "discount_id returned by handle_objection. The quote total will be adjusted.",
-        "strict": True,
-        "input_schema": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["discount_id"],
-            "properties": {
-                "discount_id": {"type": "string", "description": "The discount_id from handle_objection's available_discounts"},
-            },
-        },
+        "name": "get_offers",
+        "description": "Read-only. The options open to this customer now to lower the quote (a standard slot instead of "
+                       "rush, dropping an add-on, an advance-booking courtesy), each priced by the rate card. "
+                       "The only source of offers.",
+        "input_schema": {"type": "object", "properties": {}},
     },
     {
-        "name": "contact_operator",
-        "description": "Draft an email to the dive operator requesting a custom price adjustment that exceeds "
-                       "the self-serve discount threshold. Use when the customer needs a larger reduction than "
-                       "the available discounts offer. Include the customer's reasoning for the adjustment.",
+        "name": "apply_offer",
+        "description": "Apply one option the customer accepted, by the id get_offers returned. The server re-prices "
+                       "the quote; you cannot set an amount.",
         "strict": True,
-        "input_schema": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["client_reasoning"],
-            "properties": {
-                "client_reasoning": {
-                    "type": "string",
-                    "description": "The customer's explanation for why they need a larger price adjustment, "
-                                   "in their own words or a faithful summary.",
-                },
-            },
-        },
+        "input_schema": {"type": "object", "additionalProperties": False, "required": ["offer_id"],
+                         "properties": {"offer_id": {"type": "string"}}},
     },
 ]
 
@@ -274,21 +244,65 @@ def open_slots(session_id):
             if not s["_taken_demo"] and slot_free(s["slot_id"], session_id, booked)]
 
 
+def release_slot(sid, s):
+    slot, s["slot"] = s["slot"], None
+    if slot and HOLDS.get(slot["slot_id"], (None,))[0] == sid:
+        del HOLDS[slot["slot_id"]]
+
+
+def set_quote(sid, s, scope, courtesy=None):
+    """The one place a quote is made. A new quote is a new price, so a PayPal order made for the old one is
+    stale, and a courtesy lasts only while the scope and slot it was given for do."""
+    q = pricing.quote(scope, mobilization_courtesy=courtesy["pct"] if courtesy else 0.0)
+    s["scope"], s["quote"] = scope, {**q, "id": "Q-" + uuid.uuid4().hex[:8].upper()}
+    s["courtesy"], s["order_id"], s["offered"] = courtesy, None, []
+    if s["slot"] and not scope["rush"] and s["slot"]["rush"]:
+        release_slot(sid, s)
+        q["note"] = "Held slot released: it needs rush=true."
+    return q
+
+
 def run_tool(sid, s, name, args):
-    if s["booking"] and name in ("price_quote", "hold_slot"):  # a paid job keeps its price and slot
+    if s["booking"] and name in ("price_quote", "hold_slot", "apply_offer"):  # a paid job keeps its price and slot
         return {"error": f"already booked as {s['booking']['id']}: its price and slot are fixed. Another job needs a new chat."}
     if name == "price_quote":
-        q = pricing.quote(args)
-        s["scope"], s["quote"] = args, {**q, "id": "Q-" + uuid.uuid4().hex[:8].upper()}
-        if s["slot"] and not args["rush"] and s["slot"]["rush"]:
-            s["slot"] = None
-            q["note"] = "Held slot released: it needs rush=true."
-        return q
+        return set_quote(sid, s, args)  # a changed scope clears any courtesy: ask get_offers again
+    if name in ("explain_price", "get_offers", "apply_offer") and not s["quote"]:
+        return {"error": "call price_quote first"}
+    if name == "explain_price":
+        return negotiation.explain(s["scope"], s["quote"], s.get("courtesy"))
+    if name == "get_offers":
+        offs = negotiation.offers(s["scope"], s["quote"], s.get("courtesy"), open_slots(sid), dt.date.today(), s.get("applied", 0))
+        s["offered"] = [o["id"] for o in offs]
+        return {"offers": offs, "note": negotiation.NOTE if offs else
+                "No options are open on this quote. Kindly say what the price covers and what is firm, and offer to go on."}
+    if name == "apply_offer":
+        oid = args["offer_id"]
+        if oid not in s.get("offered", []):  # only an id the server listed, and only since the last quote
+            return {"error": "that option was not offered: call get_offers and use one of its ids"}
+        res = negotiation.apply(s["scope"], s.get("courtesy"), oid, dt.date.today())
+        s["offered"] = []
+        if "error" in res:
+            return res
+        q = set_quote(sid, s, res["scope"], res["courtesy"])
+        s["applied"] = s.get("applied", 0) + 1
+        out = {"applied": oid, "quote": q}
+        if s["courtesy"] and s["slot"] and not negotiation.slot_qualifies(s["courtesy"], s["slot"]):
+            release_slot(sid, s)
+            out["note"] = (f"The courtesy needs a slot on or after {s['courtesy']['min_slot_date']}, so the held slot was "
+                           "released. Call list_slots and hold one that qualifies.")
+        return out
     if name == "search_similar_sites":
         s["precedent"] = precedent.search(**args)
         return s["precedent"]
     if name == "list_slots":
-        slots = open_slots(sid)[:8]
+        slots = open_slots(sid)
+        if s.get("courtesy"):  # slots that keep the courtesy first, then a few earlier ones that would end it
+            for x in slots:
+                x["qualifies_for_courtesy"] = negotiation.slot_qualifies(s["courtesy"], x)
+            slots = [x for x in slots if x["qualifies_for_courtesy"]][:5] + \
+                    [x for x in slots if not x["qualifies_for_courtesy"] and not x["rush"]][:3]
+        slots = slots[:8]
         weather.annotate_slots(slots)
         return {"slots": slots}
     if name == "hold_slot":
@@ -299,29 +313,17 @@ def run_tool(sid, s, name, args):
             return {"error": "call price_quote first"}
         if slot["rush"] and not s["scope"]["rush"]:
             return {"error": "this slot is within 3 business days: re-run price_quote with rush=true first"}
+        note = None
+        if not negotiation.slot_qualifies(s.get("courtesy"), slot):  # an earlier slot ends the courtesy
+            old = s["courtesy"]
+            set_quote(sid, s, s["scope"])
+            note = (f"The advance-booking courtesy ended: this slot is before {old['min_slot_date']}. "
+                    f"The total is back to ${s['quote']['total']:.2f}.")
         HOLDS[slot["slot_id"]] = (sid, time.time() + 900)
         s["slot"] = slot
-        return {"held": slot["label"], "deposit_due": s["quote"]["deposit"],
-                "next": "The PayPal deposit button is now on the customer's job sheet."}
-    if name == "handle_objection":
-        return pricing.evaluate_objection(args["objection_type"], s.get("scope"), s.get("quote"))
-    if name == "apply_discount":
-        if not s["quote"]:
-            return {"error": "call price_quote first"}
-        if s["booking"]:
-            return {"error": f"already booked as {s['booking']['id']}: its price is fixed."}
-        result = pricing.apply_discount(args["discount_id"], s.get("scope", {}), s["quote"])
-        if result is None:
-            return {"error": f"discount '{args['discount_id']}' is not applicable — re-quote with adjusted scope instead"}
-        s["quote"] = {**s["quote"], **result, "id": s["quote"]["id"]}
-        return {"applied": args["discount_id"], "new_total": result["total"],
-                "new_deposit": result["deposit"], "new_balance": result["balance"]}
-    if name == "contact_operator":
-        if not s["quote"] or not s.get("scope"):
-            return {"error": "call price_quote first"}
-        email = pricing.draft_operator_email(s["scope"], s["quote"], args["client_reasoning"])
-        s["operator_email"] = email
-        return email
+        out = {"held": slot["label"], "deposit_due": s["quote"]["deposit"],
+               "next": "The PayPal deposit button is now on the customer's job sheet."}
+        return {**out, "note": note} if note else out
     return {"error": f"unknown tool {name}"}
 
 
@@ -387,7 +389,9 @@ def rate_limit(request):
 
 
 def public_state(s):
-    return {k: s.get(k) for k in ("quote", "scope", "slot", "booking", "precedent")}
+    out = {k: s.get(k) for k in ("quote", "scope", "slot", "booking", "precedent", "courtesy")}
+    out["why"] = negotiation.explain(s["scope"], s["quote"], s.get("courtesy")) if s.get("quote") else None
+    return out
 
 
 app = FastAPI()
@@ -463,6 +467,8 @@ def order(body: dict):
             raise HTTPException(400, "need a quote and a held slot first")
         if not slot_free(slot["slot_id"], sid):
             raise HTTPException(409, "that slot was just taken; ask the agent for another")
+        if not negotiation.slot_qualifies(s.get("courtesy"), slot):  # hold_slot keeps these in step; belt and braces
+            raise HTTPException(409, "this slot is earlier than the advance-booking courtesy allows; ask the agent")
         HOLDS[slot["slot_id"]] = (sid, time.time() + 900)
         desc = f"30% deposit, ROV inspection: {s['scope']['site_name']} on {slot['label']} ({q['id']})"
         try:

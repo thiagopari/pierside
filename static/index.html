@@ -66,6 +66,18 @@
   .weather.go { background: var(--ok-bg); color: var(--ok); }
   .weather.caution { background: #fdf6ec; color: var(--warn); }
   .weather.poor { background: #fde8e8; color: #a32020; }
+  details.why { margin: 10px 0 0; font-size: 13px; border: 1px solid var(--line); border-radius: 8px; }
+  details.why summary { cursor: pointer; padding: 8px 10px; font-weight: 600; color: var(--sea); list-style: none; }
+  details.why summary::before { content: "▸ "; }
+  details.why[open] summary::before { content: "▾ "; }
+  details.why .why-body { padding: 0 10px 10px; }
+  .why-line { margin: 6px 0; }
+  .why-line .tag { font-size: 11px; padding: 1px 5px; border-radius: 4px; margin-left: 6px; }
+  .why-line .tag.fixed { background: #e8edf1; color: #4a5568; }
+  .why-line .tag.depends_on_facts { background: #e3f0f5; color: var(--sea); }
+  .why-line .tag.your_choice { background: var(--ok-bg); color: var(--ok); }
+  .why-line .why-text { display: block; color: var(--muted); margin-top: 2px; }
+  .if-confirmed { margin-top: 8px; padding: 8px; background: #fdf6ec; border-radius: 6px; color: var(--warn); }
 </style>
 </head>
 <body>
@@ -161,6 +173,29 @@ function render() {
     const children = [t, scopeEl];
     if (q.estimated_sessions && q.estimated_sessions > 1) {
       children.push(el("p", "sessions", `Estimated dive sessions: ${q.estimated_sessions} (about 4 hours each)`));
+    }
+    if (state.why) {
+      const d = document.createElement("details"); d.className = "why";
+      const s = el("summary", null, "Why this price"); d.append(s);
+      const body = el("div", "why-body");
+      state.why.lines.forEach((l) => {
+        const row = el("div", "why-line");
+        const head = el("span", null, `${l.label}: ${usd(l.amount)}`);
+        const tag = el("span", "tag " + l.can_change, l.can_change.replace(/_/g, " ")); head.append(tag);
+        row.append(head);
+        if (l.why) row.append(el("span", "why-text", l.why));
+        body.append(row);
+      });
+      if (state.why.deposit_note) body.append(el("p", null, state.why.deposit_note));
+      if (state.why.if_confirmed) {
+        const ic = el("div", "if-confirmed");
+        ic.append(el("b", null, "If marine growth is confirmed: "));
+        state.why.if_confirmed.forEach((f, i) => {
+          ic.append(document.createTextNode(`${f.marine_growth}: ${usd(f.total)} (${f.change >= 0 ? "+" : ""}${usd(f.change)})${i < state.why.if_confirmed.length - 1 ? " · " : ""}`));
+        });
+        body.append(ic);
+      }
+      d.append(body); children.push(d);
     }
     $("lines").replaceChildren(...children);
   }

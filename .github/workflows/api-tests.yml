@@ -9,7 +9,7 @@ jobs:
         with: {python-version: "3.12", cache: pip}
       - run: pip install -r requirements.txt
       - name: Self-checks and end-to-end test (MOCK=1, no keys)
-        run: python pricing.py && python precedent.py && python test_e2e.py
+        run: python pricing.py && python negotiation.py && python precedent.py && python test_e2e.py
       - name: Postman collection (Newman)
         run: |
           MOCK=1 OPS_TOKEN=judge-ops DB_PATH=:memory: uvicorn app:app --port 8000 &
