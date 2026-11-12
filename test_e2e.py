@@ -66,7 +66,7 @@ def post(path, body, **headers):
 
 try:
     assert cfg["mock_ai"] and cfg["mock_paypal"], cfg
-    assert b"Choose your role" in urllib.request.urlopen(f"http://127.0.0.1:{PORT}/").read()
+    assert b"AI-powered underwater inspection booking" in urllib.request.urlopen(f"http://127.0.0.1:{PORT}/").read()
     assert b"agGrid.createGrid" in urllib.request.urlopen(f"http://127.0.0.1:{PORT}/ops").read()
 
     # negotiation: the model explains and lists options; only the server's own offers apply, once, within policy

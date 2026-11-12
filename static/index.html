@@ -78,15 +78,24 @@
   .why-line .tag.your_choice { background: var(--ok-bg); color: var(--ok); }
   .why-line .why-text { display: block; color: var(--muted); margin-top: 2px; }
   .if-confirmed { margin-top: 8px; padding: 8px; background: #fdf6ec; border-radius: 6px; color: var(--warn); }
+  .intro { padding: 18px 24px; background: var(--ink); color: #b8c8d6; font-size: 13px; line-height: 1.5; border-bottom: 1px solid #1e3a52; text-align: center; }
+  .intro strong { color: #fff; font-size: 15px; }
+  .intro .tags { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 8px; }
+  .intro .itag { padding: 3px 10px; border-radius: 99px; background: #1e3a52; font-size: 12px; color: #8fb8d4; }
 </style>
 </head>
 <body>
+<div class="intro">
+  <strong>Pierside — AI-powered underwater inspection booking</strong><br>
+  Describe your site, get a firm quote, pick a weather-checked dive slot, and pay the 30% deposit with PayPal. All in one conversation.
+  <div class="tags"><span class="itag">Claude AI</span><span class="itag">PayPal Orders + Invoicing</span><span class="itag">Elasticsearch</span><span class="itag">NOAA Weather</span></div>
+</div>
 <header>
   <div>
     <h1>Pierside</h1>
     <p>Chat with Pierre, your AI booking assistant</p>
   </div>
-  <span style="margin-left:auto"><a href="/" class="btn ghost" style="text-decoration:none">← Back</a> <button class="btn ghost" id="newJob" title="Start over with a new job">New job</button> <span class="badge" id="mode">sandbox</span></span>
+  <span style="margin-left:auto"><a href="/ops" class="btn ghost" style="text-decoration:none">Operator dashboard</a> <button class="btn ghost" id="newJob" title="Start over with a new job">New job</button> <span class="badge" id="mode">sandbox</span></span>
 </header>
 <div class="steps">
   <span class="step" data-step="0">1 · Describe the site</span>
